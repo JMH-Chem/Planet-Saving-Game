@@ -155,6 +155,28 @@ kbd {
   font-weight: 700;
 }
 
+/* 음소거: 음표 위에 사선을 그어 다른 아이콘 버튼과 같은 글리프 스타일을 유지한다 */
+#btn-sound {
+  position: relative;
+  font-size: 18px;
+}
+
+#btn-sound.off {
+  color: var(--muted);
+}
+
+#btn-sound.off::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 20px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
 .power-bar {
   margin-top: 6px;
   height: 4px;
