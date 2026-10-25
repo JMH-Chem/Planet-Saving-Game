@@ -1,3 +1,4 @@
+import { sfx } from './audio/sfx';
 import { CONFIG } from './config';
 import { Camera, type Insets, type View } from './render/camera';
 import { Renderer, type OverlayState } from './render/renderer';
@@ -291,10 +292,13 @@ export class Game {
     const ok = p
       ? this.send({ kind: 'planet', planetId: p.id, formation: this.formation })
       : this.send({ kind: 'move', x, y, formation: this.formation });
+    const kind = !p ? 'move' : p.owner === PLAYER ? 'join' : this.formation === 'cluster' ? 'assault' : 'surround';
     if (ok && n > 0) {
-      const kind = !p ? 'move' : p.owner === PLAYER ? 'join' : this.formation === 'cluster' ? 'assault' : 'surround';
       this.renderer.orderFeedback({ x0: cx / n, y0: cy / n, x1: p ? p.x : x, y1: p ? p.y : y, kind, count: n, radius: p?.radius });
     }
+    // 소리는 입력 장치(키보드/마우스/터치/미니맵)와 상관없이 여기서 한 번만 낸다
+    if (ok) sfx.order(kind);
+    else sfx.ui('deny');
     this.overlay.targeting = false;
     return ok;
   }
@@ -312,6 +316,7 @@ export class Game {
     }
     const ok = this.send({ kind: 'line', x1, y1, x2, y2 });
     if (ok && n > 0) this.renderer.orderFeedback({ x0: cx / n, y0: cy / n, x1, y1, x2, y2, kind: 'line', count: n });
+    if (ok) sfx.order('line');
     return ok;
   }
 
@@ -339,6 +344,7 @@ export class Game {
     }
     const ok = this.send({ kind: 'return' });
     if (ok) {
+      sfx.order('return');
       for (const [p, g] of groups) {
         this.renderer.orderFeedback({ x0: g.x / g.n, y0: g.y / g.n, x1: p.x, y1: p.y, kind: 'return', count: g.n, radius: p.radius });
       }

@@ -1,4 +1,5 @@
 import './style.css';
+import { sfx } from './audio/sfx';
 import type { Difficulty } from './config';
 import { Game } from './game';
 import { InputController } from './input/controller';
@@ -44,6 +45,7 @@ function isPortrait(): boolean {
 // ───────────────────────────── 화면 전환 ─────────────────────────────
 
 function teardown(): void {
+  sfx.stopAmbient();
   game?.stop();
   input?.dispose();
   minimap?.dispose();
@@ -86,6 +88,7 @@ function startMatch(s: MatchSettings): void {
     onSelectionChange: (n) => {
       hud.setSelection(n);
       syncBanner();
+      selectSound(n);
     },
     onEnd: showResult,
     onFrame: (dt) => {
@@ -94,7 +97,7 @@ function startMatch(s: MatchSettings): void {
     },
   });
   game = g;
-  if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { __game: g });
+  if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { __game: g, __sfx: sfx });
   input = new InputController(canvas, g, { onKey: handleKey });
   const avoid = ['minimap', 'minimap-tools', 'toasts', 'banner'].map((id) => $(id));
   alerts = new Alerts($('alert-arrows'), g, avoid, (text, color) => hud.toast(text, color));
@@ -107,6 +110,7 @@ function startMatch(s: MatchSettings): void {
   syncWave();
   layout(true);
   g.start();
+  sfx.startAmbient();
   hudTimer = window.setInterval(() => {
     hud.update(g.world);
     syncWave();
@@ -140,6 +144,8 @@ function showResult(winner: number): void {
     ['잃은 병력', me.stats.lost],
   );
   $('result-stats').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  sfx.stopAmbient(2.5);
+  sfx.stinger(won ? 'victory' : 'defeat');
   window.setTimeout(() => (result.hidden = false), 1200);
 }
 
@@ -158,6 +164,10 @@ function handleEvents(events: readonly GameEvent[]): void {
   if (!game) return;
   alerts?.consume(events);
   const w = game.world;
+  const cam = game.camera;
+  const a = cam.toWorld(0, 0);
+  const b = cam.toWorld(cam.width, cam.height);
+  sfx.handleEvents(events, w, { x0: a.x, y0: a.y, x1: b.x, y1: b.y });
   for (const e of events) {
     if (e.type === 'capture') {
       if (e.to === PLAYER) hud.toast(e.from === 0 ? '중립 행성 점령!' : `${w.factions[e.from].name}의 행성 탈취!`, w.factions[PLAYER].color);
@@ -199,40 +209,53 @@ function togglePause(force?: boolean): void {
   if (!game) return;
   game.paused = force ?? !game.paused;
   hud.setPaused(game.paused);
+  sfx.setPaused(game.paused);
 }
 
 function handleKey(action: 'pause' | 'formation' | 'speed' | 'alert'): void {
   if (!game) return;
   if (action === 'pause') togglePause();
   else if (action === 'alert') alerts?.jumpNext();
-  else if (action === 'formation') hud.setFormation(game.toggleFormation());
+  else if (action === 'formation') toggleFormation(game);
   else {
     game.speed = SPEEDS[(SPEEDS.indexOf(game.speed) + 1) % SPEEDS.length];
     hud.setSpeed(game.speed);
   }
+  if (action !== 'formation') sfx.ui('click');
+}
+
+function toggleFormation(g: Game): void {
+  const f = g.toggleFormation();
+  hud.setFormation(f);
+  sfx.ui('toggle', f === 'spread' ? 1 : 0);
 }
 
 function runCommand(cmd: string): void {
   const g = game;
   if (!g) return;
+  // 선택이 바뀌면 선택음(selectSound), 할 수 없는 명령이면 거절음. 귀환 성공음은 명령 쪽(order)에서 낸다
   switch (cmd) {
     case 'select-all':
       g.selectAll();
+      if (g.selection.size === 0) sfx.ui('deny');
       break;
     case 'halve':
+      if (g.selection.size <= 1) sfx.ui('deny');
       g.halveSelection();
       break;
     case 'clear':
       g.clearSelection();
+      sfx.ui('click');
       break;
     case 'formation':
-      hud.setFormation(g.toggleFormation());
+      toggleFormation(g);
       break;
     case 'attack-all':
       g.attackAll();
+      if (!g.overlay.targeting) sfx.ui('deny');
       break;
     case 'return':
-      g.commandReturn();
+      if (!g.commandReturn()) sfx.ui('deny');
       break;
   }
   syncBanner();
@@ -277,6 +300,7 @@ document.querySelector('.seg[data-name="mode"]')!.addEventListener('click', sync
 
 $('seed-random').addEventListener('click', () => (seedInput.value = String(randomSeed())));
 $('btn-start').addEventListener('click', () => {
+  sfx.unlock();
   startMatch({
     aiCount: Number(segValue('aiCount')),
     difficulty: segValue('difficulty') as Difficulty,
@@ -315,13 +339,74 @@ $('btn-confirm-stay').addEventListener('click', () => {
   confirmBox.hidden = true;
   togglePause(pausedBeforeConfirm);
 });
-$('btn-retry').addEventListener('click', () => startMatch(settings));
+$('btn-retry').addEventListener('click', () => {
+  sfx.unlock();
+  startMatch(settings);
+});
 $('btn-to-menu').addEventListener('click', showMenu);
 
 window.addEventListener('resize', () => layout(false));
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && game && !game.spectator) togglePause(true);
+  sfx.setHidden(document.hidden);
 });
+
+// ───────────────────────────── 소리 ─────────────────────────────
+
+// 브라우저는 사용자 제스처 안에서만 소리를 허락한다: 첫 입력 때 깨운다.
+// resume() 은 비동기라 첫 시도가 실패할 수도 있으므로, 실제로 돌기 시작한 뒤에야 듣기를 멈춘다
+const unlockAudio = () => {
+  sfx.unlock();
+  if (!sfx.running) return;
+  window.removeEventListener('pointerdown', unlockAudio, true);
+  window.removeEventListener('keydown', unlockAudio, true);
+};
+window.addEventListener('pointerdown', unlockAudio, true);
+window.addEventListener('keydown', unlockAudio, true);
+
+// 버튼 '톡'. 자기 소리가 따로 있는 버튼(명령 바 · 소리 · 배속)은 각 핸들러에서 낸다
+document.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest('button');
+  if (btn && !btn.matches('[data-cmd], #btn-sound, #btn-speed')) sfx.ui('click');
+});
+
+const soundBtn = $<HTMLButtonElement>('btn-sound');
+function syncSound(): void {
+  soundBtn.classList.toggle('off', sfx.muted);
+  soundBtn.setAttribute('aria-pressed', String(!sfx.muted));
+}
+function toggleSound(): void {
+  sfx.unlock();
+  sfx.toggleMuted();
+  syncSound();
+  sfx.ui('toggle', 1); // 켤 때만 들린다 (음소거 중엔 아무 소리도 내지 않는다)
+}
+soundBtn.addEventListener('click', toggleSound);
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'KeyM' && !e.repeat && !(e.target instanceof HTMLInputElement)) toggleSound();
+});
+syncSound();
+
+// 선택음: 선택한 병력이 죽어서 선택이 줄어드는 변화(매 프레임 정리)에는 울리지 않도록,
+// 입력 이벤트를 처리하는 중(직후 50ms)이거나 길게 누르기가 일어나는 순간의 변화만 사용자 선택으로 본다.
+let inputAt = 0;
+let pressAt = -1;
+let selectTimer = 0;
+for (const type of ['pointerdown', 'pointerup', 'click', 'keydown']) {
+  window.addEventListener(type, () => (inputAt = performance.now()), true);
+}
+window.addEventListener('pointerdown', () => (pressAt = performance.now()), true);
+window.addEventListener('pointerup', () => (pressAt = -1), true);
+window.addEventListener('pointercancel', () => (pressAt = -1), true);
+
+function selectSound(n: number): void {
+  const now = performance.now();
+  const longPress = pressAt >= 0 && now - pressAt > 400 && now - pressAt < 700;
+  if (n === 0 || (now - inputAt > 50 && !longPress)) return;
+  // 한 번의 입력으로 여러 번 바뀌어도(추가 선택 등) 마지막 결과로 한 번만
+  window.clearTimeout(selectTimer);
+  selectTimer = window.setTimeout(() => sfx.ui('select', n), 30);
+}
 
 // ?play 로 바로 시작 (개발/테스트용): ?play&ai=2&difficulty=hard&seed=42, 방어전은 &mode=defense
 const params = new URLSearchParams(location.search);
