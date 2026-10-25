@@ -12,6 +12,7 @@ const canvas = $<HTMLCanvasElement>('game');
 const menu = $('menu');
 const help = $('help');
 const result = $('result');
+const confirmBox = $('confirm');
 const seedInput = $<HTMLInputElement>('seed');
 const hud = new Hud();
 
@@ -48,6 +49,7 @@ function showMenu(): void {
   hud.show(false);
   result.hidden = true;
   help.hidden = true;
+  confirmBox.hidden = true;
   menu.hidden = false;
   seedInput.value = String(settings.seed);
   game = new Game(canvas, { aiCount: 3, difficulty: 'normal', seed: randomSeed(), autoplay: true, portrait: isPortrait() });
@@ -62,6 +64,7 @@ function startMatch(s: MatchSettings): void {
   menu.hidden = true;
   result.hidden = true;
   help.hidden = true;
+  confirmBox.hidden = true;
   hud.show(true);
 
   const g = new Game(canvas, s, {
@@ -221,10 +224,17 @@ $('btn-help-close').addEventListener('click', () => {
 $('btn-pause').addEventListener('click', () => togglePause());
 $('btn-speed').addEventListener('click', () => handleKey('speed'));
 $('btn-fit').addEventListener('click', () => game?.fitCamera());
+// window.confirm 은 모바일 웹뷰/임베드 환경에서 막히는 경우가 있어 화면 안 확인창을 쓴다.
+let pausedBeforeConfirm = false;
 $('btn-menu').addEventListener('click', () => {
+  pausedBeforeConfirm = !!game?.paused;
   togglePause(true);
-  if (window.confirm('메뉴로 나갈까요? 진행 중인 게임은 사라집니다.')) showMenu();
-  else togglePause(false);
+  confirmBox.hidden = false;
+});
+$('btn-confirm-leave').addEventListener('click', showMenu);
+$('btn-confirm-stay').addEventListener('click', () => {
+  confirmBox.hidden = true;
+  togglePause(pausedBeforeConfirm);
 });
 $('btn-retry').addEventListener('click', () => startMatch(settings));
 $('btn-to-menu').addEventListener('click', showMenu);
