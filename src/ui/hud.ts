@@ -24,16 +24,22 @@ export class Hud {
     this.root.hidden = !visible;
   }
 
-  /** 레이아웃 여백 (카메라 맞춤용). 명령 바가 아래에 있으면 아래, 오른쪽 세로 줄이면 오른쪽을 비운다 */
+  /**
+   * 레이아웃 여백 (카메라 맞춤 · 경계 · 알림 화살표 위치용). 명령 바가 아래에 있으면 아래, 오른쪽 세로 줄이면 오른쪽을 비운다.
+   * 미니맵은 전장 위에 떠 있는 창이라 빼지 않는다.
+   */
   insets() {
-    const top = this.root.querySelector('.top-bar')!.getBoundingClientRect().bottom + 6;
+    const topBar = this.root.querySelector<HTMLElement>('.top-bar')!;
+    const top = topBar.getBoundingClientRect().bottom + 6;
     const bar = this.root.querySelector('.command-bar')!.getBoundingClientRect();
     const vertical = bar.height > bar.width;
+    // 상단 바의 좌우 패딩 = 12px + 노치(safe-area). 가로로 눕힌 휴대폰에서 노치 밑을 전장 영역에서 뺀다
+    const cs = getComputedStyle(topBar);
     return {
       top,
-      bottom: vertical ? 12 : window.innerHeight - bar.top + 8,
-      left: 12,
-      right: vertical ? window.innerWidth - bar.left + 8 : 12,
+      bottom: vertical ? window.innerHeight - bar.bottom + 6 : window.innerHeight - bar.top + 8,
+      left: parseFloat(cs.paddingLeft) || 12,
+      right: vertical ? window.innerWidth - bar.left + 8 : parseFloat(cs.paddingRight) || 12,
     };
   }
 

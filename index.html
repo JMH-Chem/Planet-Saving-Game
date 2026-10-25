@@ -21,7 +21,6 @@
             <div class="top-actions">
               <button id="btn-speed" class="icon-btn" title="배속 (Tab)">1×</button>
               <button id="btn-pause" class="icon-btn" title="일시정지 (P)">❚❚</button>
-              <button id="btn-fit" class="icon-btn" title="전체 보기 (H)">⤢</button>
               <button id="btn-help" class="icon-btn" title="조작법">?</button>
               <button id="btn-menu" class="icon-btn" title="메뉴">☰</button>
             </div>
@@ -29,6 +28,7 @@
           <div id="power-bar" class="power-bar"></div>
         </header>
 
+        <div id="alert-arrows" class="alert-arrows"></div>
         <div id="banner" class="banner" hidden></div>
         <div id="toasts" class="toasts"></div>
         <div id="paused-tag" class="paused-tag" hidden>일시정지</div>
@@ -44,6 +44,18 @@
           <button data-cmd="attack-all" class="danger">전체 공격<kbd>G</kbd></button>
           <button data-cmd="return">귀환<kbd>R</kbd></button>
         </footer>
+
+        <div id="minimap-wrap" class="minimap">
+          <canvas id="minimap" aria-label="미니맵: 눌러서 이동, 우클릭으로 명령"></canvas>
+          <div id="minimap-tools" class="minimap-tools">
+            <button id="btn-home" class="icon-btn" title="모성으로 (H)" aria-label="모성으로">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 7.5 8 2.8l5.5 4.7M4.2 6.3v7h2.9V9.6h1.8v3.7h2.9v-7" /></svg>
+            </button>
+            <button id="btn-fit" class="icon-btn" title="전체 보기 (Z)" aria-label="전체 보기">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" /></svg>
+            </button>
+          </div>
+        </div>
       </div>
 
       <div id="menu" class="overlay">
@@ -105,9 +117,9 @@
               <tr><td>이동 · 공격</td><td>우클릭</td><td>탭 (선택 있을 때)</td></tr>
               <tr><td>횡대로 펼치기</td><td>우클릭 드래그로 선 긋기</td><td>대형 '산개' 후 탭</td></tr>
               <tr><td>대형 전환</td><td>F</td><td>대형 버튼</td></tr>
-              <tr><td>카메라</td><td>휠 확대 · 가운데 드래그 · 방향키 · H</td><td>두 손가락 이동/확대</td></tr>
+              <tr><td>카메라</td><td>휠 확대 · 화면 가장자리/방향키/가운데 드래그로 이동 · 미니맵 클릭/드래그 · H 모성 · Z 전체 보기 · 부대 번호 두 번 = 그 부대로</td><td>두 손가락 이동/확대 · 미니맵 탭/드래그 · ⌂ 모성 · ⤢ 전체 보기</td></tr>
               <tr><td>부대 지정</td><td>Ctrl+1~9 지정, 1~9 호출</td><td>—</td></tr>
-              <tr><td>기타</td><td>A 전체 · Q 절반 · Esc 해제 · G 전체공격 · R 귀환 · P 정지 · Tab 배속</td><td>하단 버튼</td></tr>
+              <tr><td>기타</td><td>A 전체 · Q 절반 · Esc 해제 · G 전체공격 · R 귀환 · 미니맵 우클릭 = 그곳으로 명령 · Space 알림 위치로 · P 정지 · Tab 배속</td><td>하단 버튼 · 화면 가장자리 알림 화살표 탭 = 그곳으로</td></tr>
             </tbody>
           </table>
           <p class="tip">대형이 <b>집중</b>이면 적 행성 지정 = <b>돌파</b>(대기권으로 뭉쳐서 강하), <b>산개</b>면 = <b>포위</b>(대기권 바로 밖에 둘러서서 수비대와 교전).</p>

@@ -2,8 +2,10 @@ import './style.css';
 import type { Difficulty } from './config';
 import { Game } from './game';
 import { InputController } from './input/controller';
+import { Minimap } from './render/minimap';
 import type { MatchSettings } from './sim/match';
 import { PLAYER, type GameEvent, type GameMode } from './sim/types';
+import { Alerts } from './ui/alerts';
 import { Hud } from './ui/hud';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -25,6 +27,8 @@ const SPEEDS = [1, 2, 3];
 
 let game: Game | null = null;
 let input: InputController | null = null;
+let minimap: Minimap | null = null;
+let alerts: Alerts | null = null;
 let hudTimer = 0;
 let settings: MatchSettings = { aiCount: 1, difficulty: 'normal', seed: randomSeed(), mode: 'conquest' };
 
@@ -42,9 +46,13 @@ function isPortrait(): boolean {
 function teardown(): void {
   game?.stop();
   input?.dispose();
+  minimap?.dispose();
+  alerts?.dispose();
   window.clearInterval(hudTimer);
   game = null;
   input = null;
+  minimap = null;
+  alerts = null;
 }
 
 /** 메뉴 뒤에서 AI 끼리 싸우는 관전 화면 */
@@ -80,10 +88,17 @@ function startMatch(s: MatchSettings): void {
       syncBanner();
     },
     onEnd: showResult,
+    onFrame: (dt) => {
+      alerts?.update(dt);
+      minimap?.update(dt);
+    },
   });
   game = g;
   if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { __game: g });
   input = new InputController(canvas, g, { onKey: handleKey });
+  const avoid = ['minimap', 'minimap-tools', 'toasts', 'banner'].map((id) => $(id));
+  alerts = new Alerts($('alert-arrows'), g, avoid, (text, color) => hud.toast(text, color));
+  minimap = new Minimap($<HTMLCanvasElement>('minimap'), g, alerts);
   hud.setSelection(0);
   hud.setFormation(g.formation);
   hud.setPaused(false);
@@ -130,6 +145,9 @@ function showResult(winner: number): void {
 
 function layout(refit: boolean): void {
   if (!game) return;
+  // 미니맵 크기가 명령 바 위치(--minimap-reserve)를 정하므로 인셋을 재기 전에 먼저 맞춘다
+  minimap?.layout();
+  alerts?.layout();
   const insets = game.spectator ? { top: 24, bottom: 24, left: 24, right: 24 } : hud.insets();
   game.resize(window.innerWidth, window.innerHeight, insets, refit);
 }
@@ -138,6 +156,7 @@ function layout(refit: boolean): void {
 
 function handleEvents(events: readonly GameEvent[]): void {
   if (!game) return;
+  alerts?.consume(events);
   const w = game.world;
   for (const e of events) {
     if (e.type === 'capture') {
@@ -182,9 +201,10 @@ function togglePause(force?: boolean): void {
   hud.setPaused(game.paused);
 }
 
-function handleKey(action: 'pause' | 'formation' | 'speed'): void {
+function handleKey(action: 'pause' | 'formation' | 'speed' | 'alert'): void {
   if (!game) return;
   if (action === 'pause') togglePause();
+  else if (action === 'alert') alerts?.jumpNext();
   else if (action === 'formation') hud.setFormation(game.toggleFormation());
   else {
     game.speed = SPEEDS[(SPEEDS.indexOf(game.speed) + 1) % SPEEDS.length];
@@ -281,7 +301,8 @@ $('btn-help-close').addEventListener('click', () => {
 
 $('btn-pause').addEventListener('click', () => togglePause());
 $('btn-speed').addEventListener('click', () => handleKey('speed'));
-$('btn-fit').addEventListener('click', () => game?.fitCamera());
+$('btn-fit').addEventListener('click', () => game?.toggleOverview());
+$('btn-home').addEventListener('click', () => game?.focusHome());
 // window.confirm 은 모바일 웹뷰/임베드 환경에서 막히는 경우가 있어 화면 안 확인창을 쓴다.
 let pausedBeforeConfirm = false;
 $('btn-menu').addEventListener('click', () => {
