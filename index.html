@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#05060d" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>행성 지키기</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game"></canvas>
+
+      <div id="hud" hidden>
+        <header class="top-bar">
+          <div class="top-row">
+            <div id="faction-stats" class="faction-stats"></div>
+            <div id="timer" class="timer">00:00</div>
+            <div class="top-actions">
+              <button id="btn-speed" class="icon-btn" title="배속 (Tab)">1×</button>
+              <button id="btn-pause" class="icon-btn" title="일시정지 (P)">❚❚</button>
+              <button id="btn-fit" class="icon-btn" title="전체 보기 (H)">⤢</button>
+              <button id="btn-help" class="icon-btn" title="조작법">?</button>
+              <button id="btn-menu" class="icon-btn" title="메뉴">☰</button>
+            </div>
+          </div>
+          <div id="power-bar" class="power-bar"></div>
+        </header>
+
+        <div id="banner" class="banner" hidden></div>
+        <div id="toasts" class="toasts"></div>
+        <div id="paused-tag" class="paused-tag" hidden>일시정지</div>
+
+        <footer class="command-bar">
+          <div id="sel-count" class="sel-count"><b>0</b><span>선택</span></div>
+          <button data-cmd="select-all">전체 선택<kbd>A</kbd></button>
+          <button data-cmd="halve">절반<kbd>Q</kbd></button>
+          <button data-cmd="clear">해제<kbd>Esc</kbd></button>
+          <button data-cmd="formation" id="btn-formation" class="formation" data-mode="cluster">
+            <span class="f-icon" aria-hidden="true"></span><span class="f-label">집중</span><kbd>F</kbd>
+          </button>
+          <button data-cmd="attack-all" class="danger">전체 공격<kbd>G</kbd></button>
+          <button data-cmd="return">귀환<kbd>R</kbd></button>
+        </footer>
+      </div>
+
+      <div id="menu" class="overlay">
+        <div class="panel">
+          <h1>행성 지키기</h1>
+          <p class="sub">PLANET SAVING GAME · 프로토타입 v0.1</p>
+          <div class="field">
+            <label>적 진영 수</label>
+            <div class="seg" data-name="aiCount">
+              <button data-v="1" class="on">1</button>
+              <button data-v="2">2</button>
+              <button data-v="3">3</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>난이도</label>
+            <div class="seg" data-name="difficulty">
+              <button data-v="easy">쉬움</button>
+              <button data-v="normal" class="on">보통</button>
+              <button data-v="hard">어려움</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="seed">맵 시드</label>
+            <div class="seed">
+              <input id="seed" inputmode="numeric" autocomplete="off" />
+              <button id="seed-random" title="무작위">↻</button>
+            </div>
+          </div>
+          <button id="btn-start" class="primary">게임 시작</button>
+          <button id="btn-howto" class="ghost">조작법 · 규칙</button>
+        </div>
+      </div>
+
+      <div id="help" class="overlay" hidden>
+        <div class="panel wide">
+          <h2>핵심 규칙</h2>
+          <ol class="rules">
+            <li><b>행성은 병력을 생산</b>하고, 병력은 행성 궤도를 돈다. 궤도가 정원에 차면 생산이 멈춘다.</li>
+            <li><b>위치가 곧 명령이다.</b> 적 행성 <em>대기권(점선 원) 안</em>의 병력은 행성 방어도를 직접 때리고, <em>밖</em>의 병력은 사거리 안의 적 병력과 싸운다.</li>
+            <li><b>방어막은 궤도 수비대가 유지한다.</b> 행성 피해 = 공격측 ÷ (공격측 + 수비측). 압도적인 수로 돌파하거나, 포위로 수비대를 먼저 깎아라.</li>
+            <li><b>방어도 0 → 점령.</b> 그 순간 궤도를 지키던 적 병력은 <em>고립</em>되어 체력이 줄고 공격력이 반감된다. 대신 대기권 안에 남아 행성을 되찾으려 한다.</li>
+          </ol>
+          <h2>조작</h2>
+          <table class="controls">
+            <thead><tr><th></th><th>PC</th><th>모바일</th></tr></thead>
+            <tbody>
+              <tr><td>범위 선택</td><td>좌클릭 드래그 (Shift: 추가)</td><td>한 손가락 드래그</td></tr>
+              <tr><td>행성 병력 선택</td><td>아군 행성 클릭</td><td>탭 (선택 없을 때) / 길게 누르기</td></tr>
+              <tr><td>주변 전부 선택</td><td>더블클릭</td><td>더블탭</td></tr>
+              <tr><td>이동 · 공격</td><td>우클릭</td><td>탭 (선택 있을 때)</td></tr>
+              <tr><td>횡대로 펼치기</td><td>우클릭 드래그로 선 긋기</td><td>대형 '산개' 후 탭</td></tr>
+              <tr><td>대형 전환</td><td>F</td><td>대형 버튼</td></tr>
+              <tr><td>카메라</td><td>휠 확대 · 가운데 드래그 · 방향키 · H</td><td>두 손가락 이동/확대</td></tr>
+              <tr><td>부대 지정</td><td>Ctrl+1~9 지정, 1~9 호출</td><td>—</td></tr>
+              <tr><td>기타</td><td>A 전체 · Q 절반 · Esc 해제 · G 전체공격 · R 귀환 · P 정지 · Tab 배속</td><td>하단 버튼</td></tr>
+            </tbody>
+          </table>
+          <p class="tip">대형이 <b>집중</b>이면 적 행성 지정 = <b>돌파</b>(대기권으로 뭉쳐서 강하), <b>산개</b>면 = <b>포위</b>(대기권 바로 밖에 둘러서서 수비대와 교전).</p>
+          <button id="btn-help-close" class="primary">닫기</button>
+        </div>
+      </div>
+
+      <div id="result" class="overlay" hidden>
+        <div class="panel">
+          <h1 id="result-title">승리</h1>
+          <p id="result-sub" class="sub"></p>
+          <dl id="result-stats" class="stats"></dl>
+          <button id="btn-retry" class="primary">다시 하기</button>
+          <button id="btn-to-menu" class="ghost">메뉴로</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
