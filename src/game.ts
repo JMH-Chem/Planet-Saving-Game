@@ -215,21 +215,72 @@ export class Game {
   /** 지점에 명령: 행성 위면 합류/돌파/포위, 아니면 현재 대형으로 이동 */
   commandAt(x: number, y: number): boolean {
     const p = this.world.planetAt(x, y, 6);
+    // 명령 피드백용 선택 무게중심 (send 전에 계산: 명령 자체는 다음 틱에 적용된다)
+    let cx = 0, cy = 0, n = 0;
+    for (const id of this.selection) {
+      const u = this.world.getUnit(id);
+      if (u) {
+        cx += u.x;
+        cy += u.y;
+        n++;
+      }
+    }
     const ok = p
       ? this.send({ kind: 'planet', planetId: p.id, formation: this.formation })
       : this.send({ kind: 'move', x, y, formation: this.formation });
-    if (ok) this.renderer.marker(p ? p.x : x, p ? p.y : y, this.world.factions[PLAYER].color);
+    if (ok && n > 0) {
+      const kind = !p ? 'move' : p.owner === PLAYER ? 'join' : this.formation === 'cluster' ? 'assault' : 'surround';
+      this.renderer.orderFeedback({ x0: cx / n, y0: cy / n, x1: p ? p.x : x, y1: p ? p.y : y, kind, count: n, radius: p?.radius });
+    }
     this.overlay.targeting = false;
     return ok;
   }
 
   commandLine(x1: number, y1: number, x2: number, y2: number): boolean {
     this.overlay.targeting = false;
-    return this.send({ kind: 'line', x1, y1, x2, y2 });
+    let cx = 0, cy = 0, n = 0;
+    for (const id of this.selection) {
+      const u = this.world.getUnit(id);
+      if (u) {
+        cx += u.x;
+        cy += u.y;
+        n++;
+      }
+    }
+    const ok = this.send({ kind: 'line', x1, y1, x2, y2 });
+    if (ok && n > 0) this.renderer.orderFeedback({ x0: cx / n, y0: cy / n, x1, y1, x2, y2, kind: 'line', count: n });
+    return ok;
   }
 
   commandReturn(): boolean {
-    return this.send({ kind: 'return' });
+    // 시뮬레이션과 같은 규칙(각자 가장 가까운 아군 행성)으로 묶어서, 귀환할 행성마다 경로를 보여 준다
+    const groups = new Map<Planet, { x: number; y: number; n: number }>();
+    const friendly = this.world.planets.filter((p) => p.owner === PLAYER);
+    for (const id of this.selection) {
+      const u = this.world.getUnit(id);
+      if (!u || friendly.length === 0) continue;
+      let best = friendly[0];
+      let bestD = Infinity;
+      for (const p of friendly) {
+        const d = Math.hypot(p.x - u.x, p.y - u.y);
+        if (d < bestD) {
+          bestD = d;
+          best = p;
+        }
+      }
+      const g = groups.get(best) ?? { x: 0, y: 0, n: 0 };
+      g.x += u.x;
+      g.y += u.y;
+      g.n++;
+      groups.set(best, g);
+    }
+    const ok = this.send({ kind: 'return' });
+    if (ok) {
+      for (const [p, g] of groups) {
+        this.renderer.orderFeedback({ x0: g.x / g.n, y0: g.y / g.n, x1: p.x, y1: p.y, kind: 'return', count: g.n, radius: p.radius });
+      }
+    }
+    return ok;
   }
 
   /** 전체 선택 후 목표 지정 대기 */
