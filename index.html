@@ -17,6 +17,7 @@
           <div class="top-row">
             <div id="faction-stats" class="faction-stats"></div>
             <div id="timer" class="timer">00:00</div>
+            <div id="wave" class="wave" hidden><span></span></div>
             <div class="top-actions">
               <button id="btn-speed" class="icon-btn" title="배속 (Tab)">1×</button>
               <button id="btn-pause" class="icon-btn" title="일시정지 (P)">❚❚</button>
@@ -50,6 +51,14 @@
           <h1>행성 지키기</h1>
           <p class="sub">PLANET SAVING GAME · 프로토타입 v0.1</p>
           <div class="field">
+            <label>모드</label>
+            <div class="seg" data-name="mode">
+              <button data-v="conquest" class="on">정복전</button>
+              <button data-v="defense">방어전</button>
+            </div>
+            <p id="mode-desc" class="mode-desc">적 진영의 행성과 병력을 모두 없애면 승리</p>
+          </div>
+          <div id="field-aiCount" class="field">
             <label>적 진영 수</label>
             <div class="seg" data-name="aiCount">
               <button data-v="1" class="on">1</button>
