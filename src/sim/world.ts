@@ -10,6 +10,7 @@ import {
   type GameEvent,
   type Planet,
   type Unit,
+  type WarpGate,
 } from './types';
 
 export interface PlanetInit {
@@ -44,6 +45,13 @@ export class World {
   tick = 0;
   /** 승자 (null = 진행 중) */
   winner: FactionId | null = null;
+  /** 방어전 워프 게이트 (정복전에서는 항상 비어 있음) */
+  gates: WarpGate[] = [];
+  /**
+   * 승패 규칙 교체용 훅 (방어전 등). 매 틱 끝에 호출되며, 승자를 반환하면 게임이 끝난다.
+   * null 이면 기본 규칙: 살아남은 (중립 제외) 진영이 하나뿐일 때 그 진영이 승리.
+   */
+  winRule: ((world: World) => FactionId | null) | null = null;
   /** 이번 틱에 발생한 이벤트. 렌더러/UI 가 읽고 비운다 */
   events: GameEvent[] = [];
   readonly grid: SpatialGrid;
@@ -68,6 +76,7 @@ export class World {
       color: FACTION_COLORS[id] ?? '#ffffff',
       isAI: id !== NEUTRAL && !!init.aiFactions[id],
       alive: true,
+      invader: false,
       stats: { produced: 0, lost: 0, kills: 0, planetsCaptured: 0 },
     }));
     this.planetCount = new Array(n).fill(0);
@@ -358,8 +367,9 @@ export class World {
       p.prodProgress += p.production * dt;
       while (p.prodProgress >= 1) {
         p.prodProgress -= 1;
-        this.spawnUnit(p.owner, p);
+        const u = this.spawnUnit(p.owner, p);
         p.orbitCount[p.owner]++;
+        this.events.push({ type: 'spawn', x: u.x, y: u.y, faction: u.faction, planetId: p.id });
       }
     }
   }
@@ -389,7 +399,7 @@ export class World {
       }
       if (u.state === 'orbit') this.planets[u.planet].orbitCount[u.faction]++;
       // 행성을 모두 잃은 진영의 병력은 전원 고립.
-      if (this.planetCount[u.faction] === 0) u.isolated = true;
+      if (this.planetCount[u.faction] === 0 && !this.factions[u.faction].invader) u.isolated = true;
     }
   }
 
@@ -398,7 +408,8 @@ export class World {
     let last: FactionId = NEUTRAL;
     for (const f of this.factions) {
       if (f.id === NEUTRAL || !f.alive) continue;
-      if (this.planetCount[f.id] === 0 && this.unitCount[f.id] === 0) {
+      // 침공군은 행성도 병력도 없는 상태로 시작하므로 자동 탈락시키지 않는다 (winRule 이 판정)
+      if (!f.invader && this.planetCount[f.id] === 0 && this.unitCount[f.id] === 0) {
         f.alive = false;
         this.events.push({ type: 'eliminated', faction: f.id });
         continue;
@@ -406,6 +417,7 @@ export class World {
       aliveCount++;
       last = f.id;
     }
-    if (aliveCount <= 1) this.winner = last;
+    if (this.winRule) this.winner = this.winRule(this);
+    else if (aliveCount <= 1) this.winner = last;
   }
 }

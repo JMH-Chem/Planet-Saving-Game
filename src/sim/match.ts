@@ -1,7 +1,7 @@
 import { CONFIG, type Difficulty } from '../config';
 import { AIController } from './ai';
 import { generateMap } from './mapgen';
-import { PLAYER } from './types';
+import { PLAYER, type GameMode } from './types';
 import { World } from './world';
 
 export interface MatchSettings {
@@ -13,6 +13,8 @@ export interface MatchSettings {
   autoplay?: boolean;
   /** 세로 화면용 세로로 긴 맵 */
   portrait?: boolean;
+  /** 기본 conquest. defense 는 방어전 (src/sim/waves.ts) */
+  mode?: GameMode;
 }
 
 /** 월드 + AI 를 묶은 한 판. 브라우저와 헤드리스 테스트가 같은 코드를 쓴다. */
