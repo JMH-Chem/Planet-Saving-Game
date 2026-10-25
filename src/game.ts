@@ -1,5 +1,5 @@
 import { CONFIG } from './config';
-import { Camera, type Insets } from './render/camera';
+import { Camera, type Insets, type View } from './render/camera';
 import { Renderer, type OverlayState } from './render/renderer';
 import { Match, type MatchSettings } from './sim/match';
 import { PLAYER, type Formation, type GameEvent, type Order, type Planet } from './sim/types';
@@ -9,6 +9,8 @@ export interface GameHooks {
   onEvents?: (events: readonly GameEvent[]) => void;
   onSelectionChange?: (count: number) => void;
   onEnd?: (winner: number) => void;
+  /** 매 프레임 렌더 직후 (미니맵 · 알림 갱신용, 실제 경과 초) */
+  onFrame?: (dt: number) => void;
 }
 
 const DT = 1 / CONFIG.tickRate;
@@ -34,7 +36,8 @@ export class Game {
   private lastFrame = 0;
   private raf = 0;
   private ended = false;
-  private insets: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
+  /** 전체 보기(Z)에서 되돌아갈 시점 (보이는 영역 중심 + 배율) */
+  private overviewReturn: View | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -64,33 +67,90 @@ export class Game {
   }
 
   resize(width: number, height: number, insets: Insets, refit: boolean): void {
-    this.insets = insets;
     this.camera.resize(width, height);
+    this.camera.setBounds(this.world.width, this.world.height, insets);
     this.renderer.resize(width, height);
-    if (refit) this.fitCamera(!this.spectator);
+    if (refit) this.resetView();
   }
 
+  // ───────────────────────────── 카메라 ─────────────────────────────
+
   /**
-   * 맵 전체가 보이게 맞춘다. readable 이면 작은 화면(휴대폰)에서 너무 작아지지 않도록
-   * 최소 배율을 지키고 아군 모성 쪽을 비춘다. (전체 보기는 ⤢ 버튼 / H)
+   * 시작 화면. 관전(메뉴 배경)은 맵 전체를, 플레이는 아군 모성 주변을 확대해서 보여준다.
+   * 맵 전체는 오른쪽 아래 미니맵과 전체 보기(Z)로 본다.
    */
-  fitCamera(readable = false): void {
+  resetView(): void {
     const cam = this.camera;
-    cam.fit(this.world.width, this.world.height, this.insets);
-    const minReadable = 0.45;
-    if (!readable || cam.zoom >= minReadable) return;
-    const home = this.world.planets.find((p) => p.owner === PLAYER && p.isHome);
-    if (!home) return;
     const { width: W, height: H } = this.world;
-    const { top, right, bottom, left } = this.insets;
-    cam.zoom = minReadable;
-    // 모성을 비추되, 맵 가장자리가 보이는 영역 안쪽으로 들어오지 않게 붙인다
-    const halfW = (cam.width - left - right) / 2 / cam.zoom;
-    const halfH = (cam.height - top - bottom) / 2 / cam.zoom;
-    const cx = halfW * 2 >= W ? W / 2 : Math.min(Math.max(home.x, halfW), W - halfW);
-    const cy = halfH * 2 >= H ? H / 2 : Math.min(Math.max(home.y, halfH), H - halfH);
-    cam.x = cx + (right - left) / 2 / cam.zoom;
-    cam.y = cy + (bottom - top) / 2 / cam.zoom;
+    this.overviewReturn = null;
+    if (this.spectator) {
+      cam.jumpTo(W / 2, H / 2, cam.fitZoom());
+      return;
+    }
+    const home = this.homeFocus() ?? { x: W / 2, y: H / 2 };
+    cam.jumpTo(home.x, home.y, cam.defaultZoom());
+  }
+
+  /** 지점으로 부드럽게 이동 (미니맵 탭, 알림, 부대 위치) */
+  focusOn(x: number, y: number): void {
+    this.overviewReturn = null;
+    this.camera.moveTo(x, y, this.focusZoom());
+  }
+
+  /** H: 모성 (없으면 병력이 가장 많은 아군 행성, 그것도 없으면 아군 병력 중심) */
+  focusHome(): boolean {
+    const f = this.homeFocus();
+    if (f) this.focusOn(f.x, f.y);
+    return !!f;
+  }
+
+  /** 선택한 병력의 중심으로 (부대 번호 두 번 누르기) */
+  focusSelection(): boolean {
+    let sx = 0, sy = 0, n = 0;
+    for (const id of this.selection) {
+      const u = this.world.getUnit(id);
+      if (!u) continue;
+      sx += u.x;
+      sy += u.y;
+      n++;
+    }
+    if (n > 0) this.focusOn(sx / n, sy / n);
+    return n > 0;
+  }
+
+  /** Z / ⤢: 맵 전체 보기 ↔ 직전 시점 */
+  toggleOverview(): void {
+    const cam = this.camera;
+    const inOverview = cam.target.zoom <= cam.fitZoom() * 1.02;
+    if (inOverview) {
+      const back = this.overviewReturn ?? { ...(this.homeFocus() ?? cam.targetCenter()), zoom: cam.defaultZoom() };
+      this.overviewReturn = null;
+      cam.moveTo(back.x, back.y, back.zoom);
+      return;
+    }
+    this.overviewReturn = { ...cam.targetCenter(), zoom: cam.target.zoom };
+    cam.moveTo(this.world.width / 2, this.world.height / 2, cam.fitZoom());
+  }
+
+  /** 맵이 거의 다 보일 만큼 물러나 있으면 기본 배율로 당겨오고, 아니면 지금 배율을 유지한다 */
+  private focusZoom(): number {
+    const cam = this.camera;
+    const z = cam.target.zoom;
+    return z <= cam.fitZoom() * 1.25 ? Math.max(z, cam.defaultZoom()) : z;
+  }
+
+  private homeFocus(): { x: number; y: number } | null {
+    const mine = this.world.planets.filter((p) => p.owner === PLAYER);
+    const home = mine.find((p) => p.isHome) ?? mine.sort((a, b) => b.orbitCount[PLAYER] - a.orbitCount[PLAYER])[0];
+    if (home) return { x: home.x, y: home.y };
+    let sx = 0, sy = 0, n = 0;
+    for (const u of this.world.units) {
+      if (u.faction !== PLAYER) continue;
+      sx += u.x;
+      sy += u.y;
+      n++;
+    }
+    return n > 0 ? { x: sx / n, y: sy / n } : null;
   }
 
   private frame(now: number): void {
@@ -119,9 +179,12 @@ export class Game {
     if (this.spectator) {
       this.camera.x += Math.sin(now / 9000) * 4 * realDt;
       this.camera.y += Math.cos(now / 11000) * 3 * realDt;
+    } else {
+      this.camera.update(realDt);
     }
 
     this.renderer.render(this.world, this.camera, this.selection, this.paused ? 1 : this.acc / DT, this.overlay, realDt);
+    this.hooks.onFrame?.(realDt);
 
     if (!this.spectator && !this.ended && this.world.winner !== null) {
       this.ended = true;

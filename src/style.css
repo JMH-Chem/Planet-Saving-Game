@@ -171,16 +171,17 @@ kbd {
 
 /* ─────────── 하단 명령 바 ─────────── */
 
+/* 데스크톱: 오른쪽 아래 미니맵을 피해, 미니맵 왼쪽에 남은 폭의 가운데에 둔다 (--minimap-reserve 는 미니맵이 알려준다) */
 .command-bar {
   position: absolute;
-  left: 50%;
+  left: calc(50% - var(--minimap-reserve, 0px) / 2);
   bottom: calc(10px + var(--safe-bottom));
   transform: translateX(-50%);
   display: flex;
   gap: 6px;
   align-items: stretch;
   padding: 6px;
-  max-width: calc(100% - 16px);
+  max-width: calc(100% - 16px - var(--minimap-reserve, 0px));
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 14px;
@@ -295,6 +296,127 @@ kbd {
   letter-spacing: 0.2em;
   color: rgba(255, 255, 255, 0.75);
   pointer-events: none;
+}
+
+/* ─────────── 미니맵 ─────────── */
+
+/* 크기는 --mm-w(최대 폭) / --mm-max-h(세로로 긴 맵의 최대 높이)로 정하고, 비율은 맵을 따른다 (render/minimap.ts) */
+.minimap {
+  --mm-w: 240px;
+  --mm-max-h: 210px;
+  position: absolute;
+  right: calc(12px + var(--safe-right));
+  bottom: calc(10px + var(--safe-bottom));
+}
+
+#minimap {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  touch-action: none;
+  cursor: pointer;
+}
+
+/* 시점 사각형 · 핑을 매 프레임 그리는 투명한 위 캔버스 (위치/크기는 minimap.ts 가 #minimap 테두리 안쪽에 맞춘다) */
+.minimap-top {
+  position: absolute;
+  border-radius: 11px;
+  pointer-events: none;
+}
+
+.minimap-tools {
+  position: absolute;
+  top: 0;
+  right: 100%;
+  margin-right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.minimap-tools .icon-btn {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+.minimap-tools svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ─────────── 화면 밖 알림 화살표 ─────────── */
+
+.alert-arrows {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* 위치(transform)와 색(color)은 ui/alerts.ts 가 정한다 */
+.alert-arrow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px 0 7px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: rgba(12, 16, 32, 0.9);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: auto;
+  animation: alert-pulse 1.3s ease-out infinite;
+}
+
+.alert-arrow:hover {
+  background: rgba(28, 34, 58, 0.95);
+}
+
+.alert-arrow[data-kind='lost'] {
+  background: rgba(64, 12, 20, 0.92);
+}
+
+.aa-dir {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  transform-origin: 50% 50%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.aa-label {
+  color: var(--text);
+}
+
+@keyframes alert-pulse {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 10px transparent;
+  }
 }
 
 /* ─────────── 오버레이 ─────────── */
@@ -495,6 +617,18 @@ kbd {
   }
 }
 
+/* 미니맵 옆에 명령 바가 들어갈 폭이 없으면 미니맵을 명령 바 위로 올린다 (바 높이 60 + 간격) */
+@media (max-width: 999px) {
+  .command-bar {
+    left: 50%;
+    max-width: calc(100% - 16px);
+  }
+
+  .minimap {
+    bottom: calc(78px + var(--safe-bottom));
+  }
+}
+
 @media (max-width: 720px) {
   .command-bar {
     left: calc(8px + var(--safe-left));
@@ -536,8 +670,16 @@ kbd {
     padding: 0 6px;
   }
 
-  #btn-fit {
-    display: none;
+  /* 세로 휴대폰: 명령 바(높이 56) 바로 위, 오른쪽 끝을 명령 바와 맞춘다 */
+  .minimap {
+    --mm-w: 150px;
+    --mm-max-h: 190px;
+    right: calc(8px + var(--safe-right));
+    bottom: calc(74px + var(--safe-bottom));
+  }
+
+  .alert-arrow {
+    height: 32px;
   }
 }
 
@@ -614,5 +756,19 @@ kbd {
 
   .toasts {
     right: calc(100px + var(--safe-right));
+  }
+
+  /* 오른쪽 세로 명령 바(84px) 바로 왼쪽 아래 */
+  .minimap {
+    --mm-w: 150px;
+    --mm-max-h: 140px;
+    right: calc(98px + var(--safe-right));
+    bottom: calc(6px + var(--safe-bottom));
+  }
+
+  .minimap-tools .icon-btn {
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
   }
 }

@@ -9,6 +9,9 @@ interface Pointer {
   y: number;
   startX: number;
   startY: number;
+  /** 누른 지점의 월드 좌표. 드래그 중 화면이 스크롤돼도 상자/선의 시작점이 전장에 붙어 있게 한다 */
+  anchorX: number;
+  anchorY: number;
   startTime: number;
 }
 
@@ -17,17 +20,26 @@ type Gesture = 'none' | 'pending' | 'box' | 'line' | 'pan' | 'pinch' | 'consumed
 const DRAG_THRESHOLD = 8;
 const LONG_PRESS_MS = 450;
 const DOUBLE_MS = 320;
+/** 같은 부대 번호를 이 시간 안에 두 번 누르면 그 부대로 화면 이동 */
+const GROUP_FOCUS_MS = 350;
+/** 마우스 가장자리 스크롤: 화면 끝에서 이 거리(px) 안이면 스크롤 */
+const EDGE_PX = 14;
+/** 가장자리 스크롤 속도 (화면 px/초) */
+const EDGE_SPEED = 900;
+const KEY_PAN_SPEED = 600;
 
 export interface InputHooks {
-  /** 키보드 단축키 중 UI 쪽에서 처리해야 하는 것 (일시정지, 대형 표시 등) */
-  onKey?: (action: 'pause' | 'formation' | 'speed') => void;
+  /** 키보드 단축키 중 UI 쪽에서 처리해야 하는 것 (일시정지, 대형 표시, 알림 위치 등) */
+  onKey?: (action: 'pause' | 'formation' | 'speed' | 'alert') => void;
 }
 
 /**
  * 마우스 · 터치 · 키보드를 Game 의 선택/명령 메서드로 연결한다.
  *
- * PC   : 좌드래그 선택 · 좌클릭 행성 선택 · 우클릭 명령 · 우드래그 횡대 · 휠 줌 · 가운데 드래그 이동
- * 모바일: 한 손가락 드래그 선택 · 탭 명령(선택 없으면 행성 선택) · 길게 눌러 행성 선택 · 두 손가락 이동/확대
+ * PC   : 좌드래그 선택 · 좌클릭 행성 선택 · 우클릭 명령 · 우드래그 횡대 · 휠 줌 · 가운데 드래그/가장자리 스크롤
+ * 모바일: 한 손가락 드래그 선택 · 탭 명령(선택 없으면 행성 선택) · 길게 눌러 행성 선택 · 두 손가락 이동/확대(관성)
+ *
+ * 캔버스에서 시작한 포인터만 다룬다 (미니맵 · HUD 에서 시작한 드래그는 window 로 와도 무시).
  */
 export class InputController {
   private pointers = new Map<number, Pointer>();
@@ -35,6 +47,18 @@ export class InputController {
   private longPressTimer = 0;
   private lastTap = { time: 0, x: 0, y: 0 };
   private pinch = { dist: 0, midX: 0, midY: 0 };
+  /** 두 손가락 이동 속도 추정 (화면 px/초) — 손을 뗄 때 관성으로 넘긴다 */
+  private pinchVel = { vx: 0, vy: 0, at: 0 };
+  /**
+   * 마지막 마우스 위치 (캔버스 기준). inside = 캔버스 위에 있음 (HUD · 미니맵 위면 false).
+   * moved = 실제로 움직인 적이 있음: 브라우저는 로드/레이아웃 변경 때 제자리 가짜 pointermove 를 보내므로
+   * 그것만으로는 가장자리 스크롤을 켜지 않는다.
+   */
+  private mouse = { x: 0, y: 0, inside: false, seen: false, moved: false };
+  private edgeHold = 0;
+  /** 마우스처럼 hover 가 되는 입력 장치가 있을 때만 가장자리 스크롤 (터치 전용 기기에선 가짜 mouse 이벤트에 반응하지 않게) */
+  private readonly canHover = window.matchMedia('(any-hover: hover)').matches;
+  private lastDigit = { n: 0, at: 0 };
   private keysDown = new Set<string>();
   private keyLoop = 0;
   private disposers: (() => void)[] = [];
@@ -53,14 +77,22 @@ export class InputController {
     this.listen(canvas, 'pointerleave', () => {
       this.game.overlay.hint = null;
       this.game.overlay.hoverPlanet = -1;
+      this.mouse.inside = false;
     });
     this.listen(window, 'keydown', (e) => this.onKeyDown(e as KeyboardEvent));
     this.listen(window, 'keyup', (e) => this.keysDown.delete((e as KeyboardEvent).code));
-    this.listen(window, 'blur', () => this.keysDown.clear());
+    this.listen(window, 'blur', () => {
+      this.keysDown.clear();
+      this.mouse.inside = false;
+    });
     let last = performance.now();
     const tick = (t: number) => {
-      this.panWithKeys((t - last) / 1000);
+      // 탭 전환 등으로 프레임이 크게 비면 한 번에 멀리 튀지 않게 자른다
+      const dt = Math.min(0.1, (t - last) / 1000);
       last = t;
+      this.panWithKeys(dt);
+      this.edgeScroll(dt);
+      this.refreshDrag();
       this.keyLoop = requestAnimationFrame(tick);
     };
     this.keyLoop = requestAnimationFrame(tick);
@@ -88,7 +120,15 @@ export class InputController {
     e.preventDefault();
     this.canvas.setPointerCapture?.(e.pointerId);
     const { x, y } = this.local(e);
-    const p: Pointer = { id: e.pointerId, type: e.pointerType, button: e.button, x, y, startX: x, startY: y, startTime: performance.now() };
+    const cam = this.game.camera;
+    // 화면을 짚으면 관성 스크롤은 멈춘다 (진행 중인 부드러운 이동은 그대로)
+    cam.stopFling();
+    if (e.pointerType !== 'mouse') this.mouse.inside = false;
+    const a = cam.toWorld(x, y);
+    const p: Pointer = {
+      id: e.pointerId, type: e.pointerType, button: e.button,
+      x, y, startX: x, startY: y, anchorX: a.x, anchorY: a.y, startTime: performance.now(),
+    };
     this.pointers.set(e.pointerId, p);
 
     if (p.type !== 'mouse') {
@@ -98,6 +138,7 @@ export class InputController {
         this.game.overlay.box = null;
         this.gesture = 'pinch';
         this.pinch = this.pinchState();
+        this.pinchVel = { vx: 0, vy: 0, at: 0 };
       } else if (this.pointers.size === 1) {
         this.gesture = 'pending';
         this.longPressTimer = window.setTimeout(() => this.onLongPress(p), LONG_PRESS_MS);
@@ -111,8 +152,19 @@ export class InputController {
     const { x, y } = this.local(e);
     const p = this.pointers.get(e.pointerId);
     if (e.pointerType === 'mouse') {
-      if (e.target === this.canvas) this.updateHover(x, y);
-      else this.game.overlay.hint = null;
+      // 캡처 중에는 target 이 캔버스로 고정되므로, 드래그 중엔 HUD 위로 지나가도 가장자리 스크롤이 이어진다
+      const m = this.mouse;
+      if (m.seen && (m.x !== x || m.y !== y)) m.moved = true;
+      m.seen = true;
+      m.x = x;
+      m.y = y;
+      m.inside = e.target === this.canvas;
+      if (m.inside) {
+        this.updateHover(x, y);
+      } else {
+        this.game.overlay.hint = null;
+        this.game.overlay.hoverPlanet = -1;
+      }
     }
     if (!p) return;
     const dx = x - p.x, dy = y - p.y;
@@ -125,14 +177,14 @@ export class InputController {
       case 'pinch': {
         const s = this.pinchState();
         if (this.pinch.dist > 0) cam.zoomAt(s.midX, s.midY, s.dist / this.pinch.dist);
-        cam.panScreen(s.midX - this.pinch.midX, s.midY - this.pinch.midY);
-        cam.clampTo(this.game.world.width, this.game.world.height);
+        const mdx = s.midX - this.pinch.midX, mdy = s.midY - this.pinch.midY;
+        cam.panScreen(mdx, mdy);
+        this.trackPinchVelocity(mdx, mdy);
         this.pinch = s;
         return;
       }
       case 'pan':
         cam.panScreen(dx, dy);
-        cam.clampTo(this.game.world.width, this.game.world.height);
         return;
       case 'pending':
         if (!moved) return;
@@ -141,13 +193,7 @@ export class InputController {
         break;
     }
 
-    if (this.gesture === 'box') {
-      this.game.overlay.box = { x0: p.startX, y0: p.startY, x1: x, y1: y };
-    } else if (this.gesture === 'line') {
-      const a = cam.toWorld(p.startX, p.startY);
-      const b = cam.toWorld(x, y);
-      this.game.overlay.line = { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
-    }
+    this.refreshDrag();
   }
 
   private onUp(e: PointerEvent): void {
@@ -161,6 +207,9 @@ export class InputController {
     if (this.gesture === 'pinch') {
       // 손가락이 하나 남아도 탭으로 처리하지 않는다
       this.gesture = this.pointers.size > 0 ? 'consumed' : 'none';
+      // 두 손가락을 움직이던 중에 뗐으면 그 속도로 미끄러진다
+      const v = this.pinchVel;
+      if (performance.now() - v.at < 80 && Math.hypot(v.vx, v.vy) > 80) cam.fling(v.vx, v.vy);
       return;
     }
     if (this.pointers.size > 0) return;
@@ -170,9 +219,8 @@ export class InputController {
     const additive = e.shiftKey;
 
     if (gesture === 'box') {
-      const a = cam.toWorld(p.startX, p.startY);
       const b = cam.toWorld(p.x, p.y);
-      g.selectInRect(a.x, a.y, b.x, b.y, additive);
+      g.selectInRect(p.anchorX, p.anchorY, b.x, b.y, additive);
       g.overlay.box = null;
       return;
     }
@@ -229,12 +277,45 @@ export class InputController {
     e.preventDefault();
     const { x, y } = this.local(e);
     this.game.camera.zoomAt(x, y, Math.exp(-e.deltaY * 0.0015));
-    this.game.camera.clampTo(this.game.world.width, this.game.world.height);
   }
 
   private pinchState() {
     const [a, b] = [...this.pointers.values()];
     return { dist: Math.hypot(a.x - b.x, a.y - b.y), midX: (a.x + b.x) / 2, midY: (a.y + b.y) / 2 };
+  }
+
+  /** 손가락 이동 속도의 지수 평균. 마지막 몇 프레임만 반영되어 '던지는' 느낌이 산다 */
+  private trackPinchVelocity(dx: number, dy: number): void {
+    const now = performance.now();
+    const v = this.pinchVel;
+    const dt = (now - v.at) / 1000;
+    if (v.at > 0 && dt > 0 && dt < 0.1) {
+      v.vx = v.vx * 0.5 + (dx / dt) * 0.5;
+      v.vy = v.vy * 0.5 + (dy / dt) * 0.5;
+    } else {
+      v.vx = 0;
+      v.vy = 0;
+    }
+    v.at = now;
+  }
+
+  /**
+   * 드래그 상자/횡대 선 미리보기 갱신. 시작점은 월드에 고정돼 있으므로 화면이 스크롤되면
+   * 포인터가 가만히 있어도 다시 계산해야 한다 (매 프레임 호출).
+   */
+  private refreshDrag(): void {
+    if (this.gesture !== 'box' && this.gesture !== 'line') return;
+    let p: Pointer | undefined;
+    for (const q of this.pointers.values()) p = q;
+    if (!p) return;
+    const cam = this.game.camera;
+    if (this.gesture === 'box') {
+      const a = cam.toScreen(p.anchorX, p.anchorY);
+      this.game.overlay.box = { x0: a.x, y0: a.y, x1: p.x, y1: p.y };
+    } else {
+      const b = cam.toWorld(p.x, p.y);
+      this.game.overlay.line = { x1: p.anchorX, y1: p.anchorY, x2: b.x, y2: b.y };
+    }
   }
 
   // ───────────────────────────── 선택 규칙 ─────────────────────────────
@@ -281,9 +362,16 @@ export class InputController {
     const digit = /^Digit([1-9])$/.exec(e.code);
     if (digit) {
       const n = Number(digit[1]);
-      if (e.ctrlKey || e.metaKey) g.assignGroup(n);
-      else g.recallGroup(n);
       e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {
+        g.assignGroup(n);
+        return;
+      }
+      if (e.repeat) return;
+      const now = performance.now();
+      const twice = this.lastDigit.n === n && now - this.lastDigit.at < GROUP_FOCUS_MS;
+      this.lastDigit = { n, at: twice ? 0 : now };
+      if (g.recallGroup(n) && twice) g.focusSelection();
       return;
     }
     switch (e.code) {
@@ -307,16 +395,24 @@ export class InputController {
         g.commandReturn();
         break;
       case 'KeyP':
-      case 'Space':
         e.preventDefault();
         this.hooks.onKey?.('pause');
+        break;
+      case 'Space':
+        // 방금 누른 HUD 버튼에 포커스가 남아 있으면 Space 가 그 버튼을 다시 누르므로 막는다
+        e.preventDefault();
+        if (document.activeElement instanceof HTMLButtonElement) document.activeElement.blur();
+        if (!e.repeat) this.hooks.onKey?.('alert');
         break;
       case 'Tab':
         e.preventDefault();
         this.hooks.onKey?.('speed');
         break;
       case 'KeyH':
-        g.fitCamera();
+        if (!e.repeat) g.focusHome();
+        break;
+      case 'KeyZ':
+        if (!e.repeat && !e.ctrlKey && !e.metaKey) g.toggleOverview();
         break;
     }
   }
@@ -324,12 +420,40 @@ export class InputController {
   private panWithKeys(dt: number): void {
     if (this.keysDown.size === 0) return;
     const k = this.keysDown;
-    const v = 600 * dt;
+    const v = KEY_PAN_SPEED * dt;
     const dx = (k.has('ArrowLeft') ? v : 0) - (k.has('ArrowRight') ? v : 0);
     const dy = (k.has('ArrowUp') ? v : 0) - (k.has('ArrowDown') ? v : 0);
-    if (dx || dy) {
-      this.game.camera.panScreen(dx, dy);
-      this.game.camera.clampTo(this.game.world.width, this.game.world.height);
+    if (dx || dy) this.game.camera.panScreen(dx, dy);
+  }
+
+  /**
+   * 마우스를 화면 가장자리에 대면 그쪽으로 스크롤. 캔버스 위에 있을 때만 (HUD 버튼 · 미니맵 위는 제외),
+   * 드래그 선택/횡대 긋기 중에는 포인터가 HUD 위나 창 밖으로 나가도 계속 — 큰 상자와 긴 선을 그릴 수 있게.
+   */
+  private edgeScroll(dt: number): void {
+    const m = this.mouse;
+    // 마우스로 그리는 상자/선만 해당 (터치 드래그는 손가락이 가장자리에 닿아도 스크롤하지 않는다)
+    let dragging = false;
+    if (this.gesture === 'box' || this.gesture === 'line') {
+      for (const p of this.pointers.values()) dragging = p.type === 'mouse';
+      if (!dragging) {
+        this.edgeHold = 0;
+        return;
+      }
     }
+    const cam = this.game.camera;
+    const dx = m.x <= EDGE_PX ? 1 : m.x >= cam.width - EDGE_PX ? -1 : 0;
+    const dy = m.y <= EDGE_PX ? 1 : m.y >= cam.height - EDGE_PX ? -1 : 0;
+    const active =
+      this.canHover && m.moved && (dx !== 0 || dy !== 0) && (m.inside || dragging) && this.gesture !== 'pan' && document.hasFocus();
+    if (!active) {
+      this.edgeHold = 0;
+      return;
+    }
+    // 버튼을 누르러 가다 가장자리를 스치는 정도로는 크게 움직이지 않도록 짧게 가속한다
+    this.edgeHold += dt;
+    const v = EDGE_SPEED * Math.min(1, 0.3 + this.edgeHold * 3) * dt;
+    cam.panScreen(dx * v, dy * v);
+    if (m.inside && !dragging) this.updateHover(m.x, m.y);
   }
 }
