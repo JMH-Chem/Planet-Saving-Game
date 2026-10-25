@@ -169,6 +169,46 @@ kbd {
   transition: flex-grow 0.4s;
 }
 
+/* 방어전 웨이브 표시 (정복전에서는 숨김) */
+.wave {
+  pointer-events: none;
+}
+
+.wave span {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid rgba(255, 79, 163, 0.35);
+  color: #ffc4e1;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 다음 웨이브 게이트가 열렸다: 맥박처럼 깜빡여 시선을 끈다 */
+.wave.alert span {
+  border-color: #ff4fa3;
+  background: rgba(255, 79, 163, 0.22);
+  color: #fff;
+  animation: wave-pulse 0.8s ease-in-out infinite alternate;
+}
+
+@keyframes wave-pulse {
+  to {
+    box-shadow: 0 0 14px rgba(255, 79, 163, 0.55);
+  }
+}
+
+.mode-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+  word-break: keep-all;
+}
+
 /* ─────────── 하단 명령 바 ─────────── */
 
 .command-bar {
@@ -539,6 +579,28 @@ kbd {
   #btn-fit {
     display: none;
   }
+
+  /* 좁은 화면: 웨이브 표시는 진영 칩 아래 줄 가운데로 */
+  .top-row:has(.wave:not([hidden])) {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .wave {
+    order: 1;
+    flex-basis: 100%;
+    text-align: center;
+  }
+
+  .wave span {
+    padding: 3px 10px;
+    font-size: 12px;
+  }
+
+  /* 웨이브 줄만큼 상단 바가 길어지므로 알림을 그 아래로 내린다 */
+  #hud:has(.wave:not([hidden])) :is(.toasts, .banner) {
+    top: calc(118px + var(--safe-top));
+  }
 }
 
 @media (max-width: 480px) {
@@ -610,6 +672,11 @@ kbd {
   .banner,
   .toasts {
     top: calc(56px + var(--safe-top));
+  }
+
+  /* 방어전: 경과 시간보다 웨이브 표시가 중요하다. 한 줄에 들어가도록 시계를 숨긴다 */
+  .top-row:has(.wave:not([hidden])) .timer {
+    display: none;
   }
 
   .toasts {

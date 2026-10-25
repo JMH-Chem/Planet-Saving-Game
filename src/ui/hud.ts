@@ -10,6 +10,8 @@ export class Hud {
   private stats = $('faction-stats');
   private power = $('power-bar');
   private timer = $('timer');
+  private wave = $('wave');
+  private waveText = this.wave.querySelector('span')!;
   private selCount = $('sel-count').querySelector('b')!;
   private formationBtn = $<HTMLButtonElement>('btn-formation');
   private pauseBtn = $<HTMLButtonElement>('btn-pause');
@@ -69,6 +71,14 @@ export class Hud {
 
   setSpeed(speed: number): void {
     this.speedBtn.textContent = `${speed}×`;
+  }
+
+  /** 방어전 웨이브 표시 (null = 숨김, 정복전). alert 면 다음 웨이브 게이트가 열려 있다는 경고 */
+  setWave(text: string | null, alert = false): void {
+    this.wave.hidden = !text;
+    if (!text) return;
+    if (this.waveText.textContent !== text) this.waveText.textContent = text;
+    this.wave.classList.toggle('alert', alert);
   }
 
   setBanner(text: string | null): void {

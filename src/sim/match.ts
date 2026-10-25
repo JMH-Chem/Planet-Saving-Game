@@ -1,7 +1,8 @@
-import { CONFIG, type Difficulty } from '../config';
+import { CONFIG, DEFENSE, type Difficulty } from '../config';
 import { AIController } from './ai';
-import { generateMap } from './mapgen';
+import { generateDefenseMap, generateMap } from './mapgen';
 import { PLAYER, type GameMode } from './types';
+import { WaveDirector } from './waves';
 import { World } from './world';
 
 export interface MatchSettings {
@@ -21,8 +22,23 @@ export interface MatchSettings {
 export class Match {
   readonly world: World;
   readonly ais: AIController[] = [];
+  readonly mode: GameMode;
+  /** 방어전 웨이브 진행자 (정복전이면 null) */
+  readonly waves: WaveDirector | null = null;
 
   constructor(readonly settings: MatchSettings) {
+    this.mode = settings.mode ?? 'conquest';
+
+    if (this.mode === 'defense') {
+      // 진영: 0 중립 · 1 플레이어 · 2 침공군. 적 AI 대신 웨이브 진행자가 침공군을 지휘한다
+      const aiFactions = [false, !!settings.autoplay, true];
+      this.world = new World({ ...generateDefenseMap({ seed: settings.seed, portrait: settings.portrait }), aiFactions });
+      this.waves = new WaveDirector(this.world, settings.difficulty);
+      // 자동 진행이면 플레이어를 AI 가 맡는다. 난이도는 침공 규모만 바꾸도록 성향은 고정
+      if (settings.autoplay) this.ais.push(new AIController(PLAYER, DEFENSE.autoplayProfile, 1));
+      return;
+    }
+
     const factionCount = settings.aiCount + 1;
     const aiFactions = Array.from({ length: factionCount + 1 }, (_, id) => id > PLAYER || (id === PLAYER && !!settings.autoplay));
     this.world = new World(generateMap({ factionCount, seed: settings.seed, aiFactions, portrait: settings.portrait }));
@@ -34,6 +50,7 @@ export class Match {
 
   step(dt = 1 / CONFIG.tickRate): void {
     this.world.step(dt);
+    this.waves?.update(this.world);
     for (const ai of this.ais) ai.update(this.world);
   }
 }

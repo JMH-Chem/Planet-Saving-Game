@@ -154,9 +154,37 @@ export class World {
       inPlanet: planet.id,
       alive: true,
     };
+    return this.register(u, countAsProduced);
+  }
+
+  /** 우주 공간 (x, y) 에 위치 고수 상태로 병력을 만든다 (방어전 워프 게이트 출현) */
+  spawnAt(faction: FactionId, x: number, y: number, countAsProduced = true): Unit {
+    const u: Unit = {
+      id: this.nextUnitId++,
+      faction,
+      x,
+      y,
+      px: x,
+      py: y,
+      hp: CONFIG.unit.hp,
+      cooldown: this.rng.range(0, CONFIG.unit.attackInterval),
+      state: 'hold',
+      planet: -1,
+      tx: x,
+      ty: y,
+      orbitAngle: 0,
+      orbitAltitude: this.rng.range(CONFIG.orbitBand[0], CONFIG.orbitBand[1]),
+      isolated: false,
+      inPlanet: -1,
+      alive: true,
+    };
+    return this.register(u, countAsProduced);
+  }
+
+  private register(u: Unit, countAsProduced: boolean): Unit {
     this.units.push(u);
     this.unitById.set(u.id, u);
-    if (countAsProduced) this.factions[faction].stats.produced++;
+    if (countAsProduced) this.factions[u.faction].stats.produced++;
     return u;
   }
 
