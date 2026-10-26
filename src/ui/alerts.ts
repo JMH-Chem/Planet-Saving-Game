@@ -1,5 +1,5 @@
 import type { Game } from '../game';
-import { PLAYER, type GameEvent } from '../sim/types';
+import { PLAYER, type GameEvent, type Planet } from '../sim/types';
 
 export type AlertKind = 'attack' | 'lost' | 'wave';
 
@@ -28,8 +28,16 @@ const LOST_TTL = 8;
 const WAVE_TTL = 4;
 const MAX_ALERTS = 8;
 const MAX_ARROWS = 4;
-/** 같은 종류의 토스트를 다시 띄우기까지(초) */
+/** 같은 종류의 토스트를 다시 띄우기까지(초). 방어전 모성 경보는 이 제한을 받지 않는다 */
 const TOAST_COOLDOWN = 15;
+/**
+ * 방어전 모성 조기 경보: 침공군이 이만큼(월드 단위) 안에 들어오거나 모성으로 향하고 있는 수가 HOME_THREAT_MIN 이상이면
+ * 첫 피격 전에 미리 알린다. 모성은 피격이 시작되면 몇 초 만에 넘어가므로, 피격 알림만으로는 병력을 돌릴 시간이 없다
+ */
+const HOME_THREAT_RADIUS = 350;
+const HOME_THREAT_MIN = 20;
+/** 목적지가 모성 대기권에서 이 거리 안이면 모성으로 향하는 것으로 본다 (돌파 · 포위 자리 모두) */
+const HOME_TARGET_MARGIN = 40;
 /** Space 를 이 시간 안에 다시 누르면 다음(더 오래된) 알림으로 */
 const CYCLE_MS = 2500;
 
@@ -118,8 +126,9 @@ export class Alerts {
           this.drop(`p${p.id}`);
         }
       } else if (e.type === 'wave' && e.phase === 'warning') {
+        // 예고 동안 병력을 얼마나 돌릴지 정할 수 있게 그 게이트에서 나올 병력 수도 함께
         for (const g of w.gates) {
-          if (g.wave === e.wave) this.raise(`g${g.id}`, 'wave', g.x, g.y, `웨이브 ${e.wave}`, g.id, WAVE_TTL);
+          if (g.wave === e.wave) this.raise(`g${g.id}`, 'wave', g.x, g.y, `웨이브 ${e.wave} · ${g.count}기`, g.id, WAVE_TTL);
         }
       }
     }
@@ -131,10 +140,18 @@ export class Alerts {
     // 일시정지 중에는 알림도 멈춘다
     if (!g.paused) this.clock += dt;
 
+    const homeId = g.match.waves?.homeId ?? -1;
     for (const p of w.planets) {
-      if (p.owner !== PLAYER || p.lastAssaultBy === PLAYER || w.time - p.lastAssaultAt >= 0.5) continue;
-      if ((this.suppress.get(p.id) ?? -Infinity) > this.clock) continue;
-      this.raise(`p${p.id}`, 'attack', p.x, p.y, '공격받는 중', p.id, ATTACK_TTL);
+      if (p.owner !== PLAYER || (this.suppress.get(p.id) ?? -Infinity) > this.clock) continue;
+      if (p.lastAssaultBy !== PLAYER && w.time - p.lastAssaultAt < 0.5) {
+        const a = this.raise(`p${p.id}`, 'attack', p.x, p.y, '공격받는 중', p.id, ATTACK_TTL);
+        // 조기 경보('침공군 접근')로 떠 있던 알림이면 이름만 바꾼다 (새 알림이 아니므로 소리 · 토스트 없음)
+        if (a.kind === 'attack') a.label = '공격받는 중';
+      } else if (p.id === homeId) {
+        // 방어전 모성: 피격 전이라도 침공군이 몰려오면 미리. 행성마다 알림은 하나라 매 프레임 불러도 갱신될 뿐이다
+        const n = this.homeThreat(p);
+        if (n >= HOME_THREAT_MIN) this.raise(`p${p.id}`, 'attack', p.x, p.y, '침공군 접근', p.id, ATTACK_TTL, `모성으로 침공군 ${n}기가 오고 있습니다`);
+      }
     }
     // 웨이브 알림은 게이트가 열려 있고 병력이 막 쏟아지는 동안 유지
     for (const a of this.list) {
@@ -174,12 +191,34 @@ export class Alerts {
     this.game.focusOn(a.x, a.y);
   }
 
-  private raise(key: string, kind: AlertKind, x: number, y: number, label: string, ref: number, ttl: number): void {
+  /**
+   * 방어전 모성 근처의 침공군 수: HOME_THREAT_RADIUS 안에 있거나(포위 대기 포함) 모성 대기권 쪽으로 이동 중인 병력.
+   * 병력 목록을 한 번 훑을 뿐이라 매 프레임 불러도 싸다
+   */
+  private homeThreat(home: Planet): number {
+    const w = this.game.world;
+    const r2 = HOME_THREAT_RADIUS * HOME_THREAT_RADIUS;
+    const reach = home.atmosphereRadius + HOME_TARGET_MARGIN;
+    let n = 0;
+    for (const u of w.units) {
+      if (!w.factions[u.faction]?.invader) continue;
+      const dx = u.x - home.x, dy = u.y - home.y;
+      if (dx * dx + dy * dy <= r2) n++;
+      else if (u.state === 'move' && (u.planet === home.id || Math.hypot(u.tx - home.x, u.ty - home.y) <= reach)) n++;
+    }
+    return n;
+  }
+
+  /**
+   * 대상마다 알림 하나: 이미 같거나 더 심각한 알림이 있으면 유지 시간만 늘리고 그 알림을 돌려준다.
+   * @param toastText 공격 토스트 문구 (없으면 기본 문구)
+   */
+  private raise(key: string, kind: AlertKind, x: number, y: number, label: string, ref: number, ttl: number, toastText?: string): Alert {
     const until = this.clock + ttl;
     const old = this.list.find((a) => a.key === key);
     if (old && SEVERITY[old.kind] >= SEVERITY[kind]) {
       old.until = Math.max(old.until, until);
-      return;
+      return old;
     }
     const a: Alert = { key, kind, x, y, label, color: ALERT_COLORS[kind], born: this.clock, until, ref };
     if (old) this.list.splice(this.list.indexOf(old), 1);
@@ -187,7 +226,8 @@ export class Alerts {
     if (this.list.length > MAX_ALERTS) this.list.shift();
     this.last = { x, y };
     this.onNew?.(a);
-    if (kind === 'attack') this.toastAttack(a);
+    if (kind === 'attack') this.toastAttack(a, toastText);
+    return a;
   }
 
   private drop(key: string): void {
@@ -195,13 +235,18 @@ export class Alerts {
     if (i >= 0) this.list.splice(i, 1);
   }
 
-  /** 화면 밖 행성이 공격받기 시작하면 한 번 알려준다 (함락은 main 의 점령 토스트가 따로 알린다) */
-  private toastAttack(a: Alert): void {
-    if (!this.toast || this.clock - this.toastAt < TOAST_COOLDOWN || this.onScreen(a)) return;
-    this.toastAt = this.clock;
+  /**
+   * 화면 밖 행성이 공격받기 시작하면 한 번 알려준다 (함락은 main 의 점령 토스트가 따로 알린다).
+   * 방어전 모성은 잃으면 끝이므로 다른 행성 토스트의 대기 시간과 상관없이 알린다
+   * (알림이 사라지기 전에는 다시 생기지 않으므로 반복되지 않는다)
+   */
+  private toastAttack(a: Alert, text?: string): void {
     const home = this.game.world.planets[a.ref]?.isHome;
+    const urgent = a.ref === this.game.match.waves?.homeId;
+    if (!this.toast || (!urgent && this.clock - this.toastAt < TOAST_COOLDOWN) || this.onScreen(a)) return;
+    this.toastAt = this.clock;
     const touch = window.matchMedia('(pointer: coarse)').matches;
-    this.toast(`${home ? '모성이' : '아군 행성이'} 공격받고 있습니다${touch ? '' : ' · Space'}`, a.color);
+    this.toast(`${text ?? `${home ? '모성이' : '아군 행성이'} 공격받고 있습니다`}${touch ? '' : ' · Space'}`, a.color);
   }
 
   private onScreen(a: Alert): boolean {

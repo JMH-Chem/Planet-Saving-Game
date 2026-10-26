@@ -20,6 +20,8 @@ const DEFAULT_SPAN = 520;
 const EASE_RATE = 10;
 /** 두 손가락 이동 관성의 감쇠 (1/초) */
 const FLING_DECAY = 4.5;
+/** 관성 시작 속도 상한 (화면 px/초): 속도 추정이 튀어도 맵 끝까지 날아가지 않게. 이 속도로 약 900px 미끄러진다 */
+const MAX_FLING = 4000;
 
 /**
  * 월드 ↔ 화면 좌표 변환. (x, y) 는 화면 중앙에 오는 월드 좌표.
@@ -109,8 +111,12 @@ export class Camera {
   }
 
   update(dt: number): void {
-    if (this.vx !== 0 || this.vy !== 0) {
+    if ((this.vx !== 0 || this.vy !== 0) && dt > 0) {
+      const bx = this.x, by = this.y;
       this.panBy(this.vx * dt, this.vy * dt);
+      // 맵 끝에 막힌 축의 관성은 없앤다: 화면은 멈췄는데 속도만 남아 있으면 flingSpeed 가 '아직 미끄러지는 중'이라고 답한다
+      if (Math.abs(this.x - bx) < 1e-6) this.vx = 0;
+      if (Math.abs(this.y - by) < 1e-6) this.vy = 0;
       const decay = Math.exp(-FLING_DECAY * dt);
       this.vx *= decay;
       this.vy *= decay;
@@ -147,10 +153,17 @@ export class Camera {
     this.settle();
   }
 
-  /** 두 손가락 이동을 놓은 뒤의 관성 (화면 px/초) */
+  /** 두 손가락 이동을 놓은 뒤의 관성 (화면 px/초, MAX_FLING 으로 자른다) */
   fling(vx: number, vy: number): void {
-    this.vx = vx;
-    this.vy = vy;
+    const s = Math.hypot(vx, vy);
+    const k = s > MAX_FLING ? MAX_FLING / s : 1;
+    this.vx = vx * k;
+    this.vy = vy * k;
+  }
+
+  /** 지금 관성으로 미끄러지는 속도 (화면 px/초, 0 = 멈춤) */
+  get flingSpeed(): number {
+    return Math.hypot(this.vx, this.vy);
   }
 
   stopFling(): void {
