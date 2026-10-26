@@ -47,7 +47,7 @@ export class Game {
   ) {
     this.match = new Match(settings);
     this.spectator = !!settings.autoplay;
-    this.renderer = new Renderer(canvas);
+    this.renderer = new Renderer(canvas, { spectator: this.spectator });
   }
 
   get world() {
@@ -292,9 +292,25 @@ export class Game {
     const ok = p
       ? this.send({ kind: 'planet', planetId: p.id, formation: this.formation })
       : this.send({ kind: 'move', x, y, formation: this.formation });
-    const kind = !p ? 'move' : p.owner === PLAYER ? 'join' : this.formation === 'cluster' ? 'assault' : 'surround';
+    // 빈 우주: 시뮬레이션(orders.ts)처럼 목표를 맵 안으로 넣는다
+    const { width: W, height: H } = this.world;
+    const inside = (px: number, py: number) => ({ x: Math.min(W, Math.max(0, px)), y: Math.min(H, Math.max(0, py)) });
+    const t = inside(x, y);
+    // 산개(2기 이상)는 점이 아니라 실제로 설 횡대를 보여 준다 (터치에는 호버 힌트가 없다)
+    const spread = !p && this.formation === 'spread' && n > 1;
+    const kind = !p ? (spread ? 'line' : 'move') : p.owner === PLAYER ? 'join' : this.formation === 'cluster' ? 'assault' : 'surround';
     if (ok && n > 0) {
-      this.renderer.orderFeedback({ x0: cx / n, y0: cy / n, x1: p ? p.x : x, y1: p ? p.y : y, kind, count: n, radius: p?.radius });
+      const x0 = cx / n, y0 = cy / n;
+      if (spread) {
+        // orders.ts 와 같은 모양: 목표가 가운데, 무게중심 → 목표 방향에 수직, 반폭 130
+        const HALF = 130;
+        const len = Math.hypot(t.x - x0, t.y - y0);
+        const [dx, dy] = len < 1e-3 ? [1, 0] : [(t.x - x0) / len, (t.y - y0) / len];
+        const a = inside(t.x - dy * HALF, t.y + dx * HALF), b = inside(t.x + dy * HALF, t.y - dx * HALF);
+        this.renderer.orderFeedback({ x0, y0, x1: a.x, y1: a.y, x2: b.x, y2: b.y, kind, count: n });
+      } else {
+        this.renderer.orderFeedback({ x0, y0, x1: p ? p.x : t.x, y1: p ? p.y : t.y, kind, count: n, radius: p?.radius });
+      }
     }
     // 소리는 입력 장치(키보드/마우스/터치/미니맵)와 상관없이 여기서 한 번만 낸다
     if (ok) sfx.order(kind);
