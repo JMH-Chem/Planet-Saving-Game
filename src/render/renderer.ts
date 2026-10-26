@@ -4,8 +4,9 @@ import type { World } from '../sim/world';
 import { Background } from './background';
 import type { Camera } from './camera';
 import { Effects, inView, type ViewRect } from './effects';
-import { drawGateLabels, drawGates, invaderColor } from './gates';
+import { drawGateLabels, GateLayer, invaderColor } from './gates';
 import { OrderFx, orderColor, type OrderFeedback, type OrderKind } from './orderFx';
+import { clamp, placeBox, type Box } from './placement';
 import { PlanetLayer } from './planets';
 import { mixHex, roundRect, withAlpha } from './sprites';
 import { UnitLayer } from './units';
@@ -28,10 +29,39 @@ export interface OverlayState {
 
 const SIZE_LABEL = { small: '소형', medium: '중형', large: '대형' } as const;
 const LOSS_COLOR = '#ff5d5d';
+const DT = 1 / CONFIG.tickRate;
+
+/**
+ * 캔버스 위에 떠 있는 HUD 창 (alerts.ts 의 피할 영역과 같다). 툴팁 · 커서 힌트를 이 밑에 그리면 보이지 않는다.
+ * 명령 바 · 상단 바는 camera.viewRect() 가 이미 빼 준다. 미니맵 옆 버튼은 미니맵 상자 밖(왼쪽)에 붙어 있어 따로 잰다
+ */
+const HUD_IDS = ['minimap-wrap', 'minimap-tools', 'toasts', 'banner'];
+/** HUD 창 위치를 다시 재는 간격(초). 툴팁이 떠 있는 동안 매 프레임 레이아웃을 강제하지 않도록 */
+const HUD_BOX_TTL = 0.25;
 
 /** 움직임 줄이기 설정. 렌더러는 판마다 새로 만들어지므로 리스너 대신 한 곳에서 매번 읽는다 */
 const motionQuery = typeof window !== 'undefined' ? window.matchMedia?.('(prefers-reduced-motion: reduce)') : undefined;
 const prefersReducedMotion = () => !!motionQuery?.matches;
+
+/**
+ * 화면 배율(devicePixelRatio) 감시. 창을 1x ↔ 2x 모니터 사이로 옮기면 CSS 크기는 그대로라 'resize' 를 보내지 않는
+ * 브라우저가 있고, 그러면 백버퍼가 옛 배율에 묶여 흐려지거나(1x→2x) 쓸데없이 4배를 칠한다(2x→1x).
+ * 미디어 쿼리는 지금 배율에서만 맞으므로 바뀔 때마다 새 배율로 다시 건다. 렌더러는 판마다 새로 만들어지므로
+ * 리스너는 모듈에 하나만 두고, 마지막에 만들어진(지금 화면에 그리는) 렌더러에게만 알린다.
+ */
+let dprTarget: Renderer | null = null;
+let dprQuery: MediaQueryList | undefined;
+function watchDpr(): void {
+  dprQuery = window.matchMedia?.(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+  dprQuery?.addEventListener(
+    'change',
+    () => {
+      dprTarget?.refreshDpr();
+      watchDpr();
+    },
+    { once: true },
+  );
+}
 
 /**
  * 캔버스 렌더러. 그리는 순서:
@@ -56,11 +86,31 @@ export class Renderer {
   private shakeX = 0;
   private shakeY = 0;
   private lastHitShake = -10;
+  /** 직전 render() 때의 시뮬레이션 시각. consume() 이 받은 이벤트 묶음이 몇 틱 분량인지 안다 */
+  private simTime = 0;
+  /** 관전(메뉴 배경): 플레이어가 없으므로 플레이어 시점 연출(화면 흔들림 · 점령!/함락)을 하지 않는다 */
+  private readonly spectator: boolean;
+  private gates = new GateLayer();
+  private hudBoxes: Box[] = [];
+  private hudBoxesAt = -Infinity;
 
-  constructor(private canvas: HTMLCanvasElement) {
+  constructor(
+    private canvas: HTMLCanvasElement,
+    opts: { spectator?: boolean } = {},
+  ) {
     this.ctx = canvas.getContext('2d', { alpha: false })!;
     this.reduced = prefersReducedMotion();
+    this.spectator = !!opts.spectator;
     this.fx = new Effects(this.reduced ? 1500 : 3000);
+    if (typeof window !== 'undefined') {
+      if (!dprQuery) watchDpr();
+      dprTarget = this;
+    }
+  }
+
+  /** 배율만 바뀌었을 때(창을 다른 모니터로 옮김): 같은 CSS 크기로 백버퍼를 다시 잡는다 */
+  refreshDpr(): void {
+    if (Math.min(2, window.devicePixelRatio || 1) !== this.dpr) this.resize(this.width, this.height);
   }
 
   resize(width: number, height: number): void {
@@ -72,11 +122,12 @@ export class Renderer {
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
     this.bg.resize(width, height);
+    this.hudBoxesAt = -Infinity;
   }
 
   /** 화면 흔들림. intensity = 최대 흔들림 폭(CSS px). 여러 번 불러도 큰 쪽만 남는다 */
   shake(intensity: number): void {
-    if (this.reduced) return;
+    if (this.reduced || this.spectator) return;
     this.trauma = Math.min(16, Math.max(this.trauma, intensity));
   }
 
@@ -94,6 +145,9 @@ export class Renderer {
   consume(events: readonly GameEvent[], world: World): void {
     const fx = this.fx;
     const view = this.view;
+    // 이 묶음이 몇 틱 분량인지. 느린 기기나 배속에서는 한 프레임에 여러 틱의 이벤트가 한꺼번에 오므로
+    // 개수를 그대로 기준에 대면 같은 전투도 더 자주 흔들리고 입자가 줄어든다 → 틱당(시뮬레이션 시간당) 비율로 본다
+    const ticks = Math.max(1, Math.round((world.time - this.simTime) / DT));
     // 부하에 따라 입자 수를 줄인다 (LOD)
     const load = fx.load;
     let lod = this.reduced ? 0.5 : 1;
@@ -101,7 +155,8 @@ export class Renderer {
     else if (load > 0.45) lod *= 0.6;
     let deaths = 0;
     for (const e of events) if (e.type === 'death' && inView(view, e.x, e.y)) deaths++;
-    if (deaths > 24) lod *= 0.5;
+    const deathsPerTick = deaths / ticks;
+    if (deathsPerTick > 24) lod *= 0.5;
     let shots = 0;
 
     for (const e of events) {
@@ -130,8 +185,8 @@ export class Renderer {
           if (!visible) break;
           shots++;
           fx.beam(e.x1, e.y1, e.x2, e.y2, color);
-          // 사격이 아주 많은 프레임에는 섬광을 일부만
-          if (shots < 120 || Math.random() < 0.4) {
+          // 사격이 아주 많을 때(틱당 120발 넘게)는 섬광을 일부만
+          if (shots < 120 * ticks || Math.random() < 0.4) {
             fx.flash(e.x1, e.y1, 4.5, color, 0.08);
             fx.flash(e.x2, e.y2, 4, color, 0.11);
           }
@@ -171,16 +226,17 @@ export class Renderer {
       }
     }
 
-    // 화면 안에서 한꺼번에 많이 터지면 살짝 흔들린다
-    if (deaths >= 8) this.shake(Math.min(3.5, 0.8 + deaths * 0.12));
+    // 화면 안에서 한꺼번에(한 틱에 8기 이상) 많이 터지면 살짝 흔들린다
+    if (deathsPerTick >= 8) this.shake(Math.min(3.5, 0.8 + deathsPerTick * 0.12));
   }
 
   private onCapture(world: World, p: Planet, from: number, to: number, lod: number): void {
     const color = world.factions[to].color;
     this.planets.captured(p, color);
     const visible = inView(this.view, p.x, p.y, p.atmosphereRadius + 60);
-    const playerInvolved = to === PLAYER || from === PLAYER;
-    if (playerInvolved) this.shake(to === PLAYER ? 7 : 9);
+    // 플레이어 입장: 1 = 얻음, -1 = 잃음. 관전(메뉴 배경)에서는 1번 진영도 AI 일 뿐이니 중립적으로 보여 준다
+    const side = this.spectator ? 0 : to === PLAYER ? 1 : from === PLAYER ? -1 : 0;
+    if (side !== 0) this.shake(side > 0 ? 7 : 9);
     if (!visible) return;
     const fx = this.fx;
     const hot = mixHex(color, '#ffffff', 0.4);
@@ -194,12 +250,13 @@ export class Renderer {
       fx.sparks(p.x + Math.cos(a) * p.radius, p.y + Math.sin(a) * p.radius, 1, i % 3 === 0 ? hot : color, 170, 0.7, a, 0.3);
     }
     fx.embers(p.x, p.y, Math.round(18 * lod), color, 70, 1.1);
-    if (to === PLAYER) fx.text(p.x, p.y - p.atmosphereRadius - 6, '점령!', mixHex(color, '#ffffff', 0.25), 24);
-    else if (from === PLAYER) fx.text(p.x, p.y - p.atmosphereRadius - 6, '함락', LOSS_COLOR, 24);
+    if (side > 0) fx.text(p.x, p.y - p.atmosphereRadius - 6, '점령!', mixHex(color, '#ffffff', 0.25), 24);
+    else if (side < 0) fx.text(p.x, p.y - p.atmosphereRadius - 6, '함락', LOSS_COLOR, 24);
   }
 
   render(world: World, cam: Camera, selection: ReadonlySet<number>, alpha: number, overlay: OverlayState, dt: number): void {
     this.clock += dt;
+    this.simTime = world.time;
     this.reduced = prefersReducedMotion();
     const ctx = this.ctx;
     const zoom = cam.zoom;
@@ -216,6 +273,7 @@ export class Renderer {
     view.x1 = cam.x + halfW + margin;
     view.y0 = cam.y - halfH - margin;
     view.y1 = cam.y + halfH + margin;
+    this.gates.update(world, this.clock, this.fx, view);
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.globalAlpha = 1;
@@ -230,7 +288,7 @@ export class Renderer {
 
     this.drawWorldBounds(world, zoom);
     this.planets.draw(ctx, world, zoom, view, overlay.hoverPlanet, this.clock, this.reduced);
-    drawGates(ctx, world, zoom, view, this.clock, this.reduced);
+    this.gates.draw(ctx, world, zoom, view, this.clock, this.reduced);
     this.orders.drawPaths(ctx, zoom);
     this.fx.drawUnder(ctx, view);
     this.units.draw(ctx, world, selection, alpha, zoom, view, this.clock, dt, this.fx, this.reduced);
@@ -245,7 +303,7 @@ export class Renderer {
     // 화면 좌표계
     if (overlay.box) this.drawBox(overlay.box);
     if (overlay.hoverPlanet >= 0) this.drawPlanetTooltip(world, world.planets[overlay.hoverPlanet], cam);
-    if (overlay.hint) this.drawHint(overlay.hint, overlay.targeting);
+    if (overlay.hint) this.drawHint(overlay.hint, overlay.targeting, cam);
     // 이후에 같은 캔버스에 그리는 쪽(미니맵 등)을 위해 기본 상태로 돌려 둔다
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.globalAlpha = 1;
@@ -366,7 +424,6 @@ export class Renderer {
 
   private drawPlanetTooltip(world: World, p: Planet, cam: Camera): void {
     const ctx = this.ctx;
-    const s = cam.toScreen(p.x, p.y + p.atmosphereRadius);
     const owner = world.factions[p.owner];
     const accent = p.owner === NEUTRAL ? '#b8c4d6' : owner.color;
     const title = `${SIZE_LABEL[p.size]} 행성 · ${owner.name}${p.isHome ? ' (모성)' : ''}`;
@@ -380,8 +437,25 @@ export class Renderer {
     for (const l of lines) w = Math.max(w, ctx.measureText(l).width);
     w += 22;
     const h = 22 + lines.length * 16 + 10;
-    const x = Math.min(this.width - w - 8, Math.max(8, s.x - w / 2));
-    const y = Math.min(this.height - h - 80, s.y + 10);
+    // 대기권 아래 → 위 → 왼쪽 → 오른쪽 순으로, 행성을 가리지 않으면서 전장 영역(명령 바 · 상단 바 제외) 안,
+    // HUD 창 밖인 자리. 예전처럼 화면 높이에서 80px 만 빼면 미니맵 위쪽 행성의 툴팁이 미니맵 밑에 깔렸다
+    const c = cam.toScreen(p.x, p.y);
+    const ar = p.atmosphereRadius * cam.zoom;
+    const v = cam.viewRect();
+    const cx = clamp(c.x - w / 2, v.left, v.right - w);
+    const cy = clamp(c.y - h / 2, v.top, v.bottom - h);
+    const { x, y } = placeBox(
+      [
+        { x: cx, y: c.y + ar + 10 },
+        { x: cx, y: c.y - ar - 10 - h },
+        { x: c.x - ar - 10 - w, y: cy },
+        { x: c.x + ar + 10, y: cy },
+      ],
+      w,
+      h,
+      v,
+      this.hudBoxesNow(),
+    );
 
     ctx.fillStyle = 'rgba(8,12,26,0.9)';
     roundRect(ctx, x, y, w, h, 8);
@@ -410,13 +484,26 @@ export class Renderer {
   }
 
   /** 커서 옆 명령 미리보기: 명령 종류별 색 점 + 이름 */
-  private drawHint(h: NonNullable<OverlayState['hint']>, targeting: boolean): void {
+  private drawHint(h: NonNullable<OverlayState['hint']>, targeting: boolean, cam: Camera): void {
     const ctx = this.ctx;
     const kind: OrderKind = h.label.includes('돌파') ? 'assault' : h.label.includes('포위') ? 'surround' : h.label.includes('합류') ? 'join' : h.label.includes('횡대') ? 'line' : 'move';
     const color = orderColor(kind);
     ctx.font = '700 12px system-ui, sans-serif';
     const w = ctx.measureText(h.label).width + 28;
-    const x = Math.min(this.width - w - 4, h.x + 16), y = Math.min(this.height - 26, h.y + 14);
+    // 커서 오른쪽 아래가 기본. 화면 끝 · 명령 바 · 미니맵에 걸리면 커서의 다른 쪽으로 넘긴다
+    // (화살표 커서는 끝점에서 오른쪽 아래로 그려지므로 왼쪽 · 위쪽은 더 가까이 붙인다)
+    const { x, y } = placeBox(
+      [
+        { x: h.x + 16, y: h.y + 14 },
+        { x: h.x - 8 - w, y: h.y + 14 },
+        { x: h.x + 16, y: h.y - 8 - 22 },
+        { x: h.x - 8 - w, y: h.y - 8 - 22 },
+      ],
+      w,
+      22,
+      cam.viewRect(),
+      this.hudBoxesNow(),
+    );
     ctx.fillStyle = targeting ? 'rgba(200,50,50,0.9)' : 'rgba(8,12,26,0.85)';
     roundRect(ctx, x, y, w, 22, 11);
     ctx.fill();
@@ -431,5 +518,17 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(h.label, x + 20, y + 11.5);
+  }
+
+  /** 지금 보이는 HUD 창들의 화면 사각형 (잠깐씩 기억해 둔다) */
+  private hudBoxesNow(): readonly Box[] {
+    if (this.clock - this.hudBoxesAt < HUD_BOX_TTL) return this.hudBoxes;
+    this.hudBoxesAt = this.clock;
+    this.hudBoxes = [];
+    for (const id of HUD_IDS) {
+      const r = document.getElementById(id)?.getBoundingClientRect();
+      if (r && r.width > 0 && r.height > 0) this.hudBoxes.push({ left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+    }
+    return this.hudBoxes;
   }
 }
