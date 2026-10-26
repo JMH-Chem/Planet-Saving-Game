@@ -98,6 +98,44 @@ describe('위치 규칙 · 점령', () => {
     expect(free).toBeGreaterThan(0);
     expect(contested).toBeLessThan(free * 0.6);
   });
+
+  it('남의 행성을 도는 병력은 수비대와 반대로 돌고, 점령되면 그 틱부터 방향이 바뀐다', () => {
+    const w = makeWorld([
+      { x: 100, y: 300, size: 'large', owner: 1 },
+      { x: 500, y: 300, size: 'medium', owner: 2, garrison: 1 },
+    ]);
+    const p = w.planets[1];
+    const defender = w.units.find((u) => u.faction === 2 && u.planet === p.id)!;
+    const intruder = w.spawnUnit(1, p, false);
+    const turn = () => {
+      const a0 = defender.orbitAngle, b0 = intruder.orbitAngle;
+      w.step(DT);
+      return [Math.sign(defender.orbitAngle - a0), Math.sign(intruder.orbitAngle - b0)];
+    };
+    expect(turn()).toEqual([1, Math.sign(CONFIG.intruderOrbitFactor)]);
+    w.capture(p, 1);
+    expect(turn()).toEqual([Math.sign(CONFIG.intruderOrbitFactor), 1]);
+  });
+
+  it('강하 병력이 수비대와 엇갈려 돌므로 두꺼운 궤도 수비대는 비슷한 수의 돌파를 막아 낸다', () => {
+    // 같은 방향으로 돌던 때는 처음 사거리 밖에 내린 강하 병력이 끝까지 맞지 않아 80 vs 120 이 함락됐다
+    const w = new World({
+      width: 1000, height: 600, seed: 2, factionCount: 2, aiFactions: [],
+      planets: [
+        { x: 100, y: 300, size: 'large', owner: 1, garrison: 0 },
+        { x: 600, y: 300, size: 'large', owner: 2, garrison: 80 },
+        { x: 960, y: 560, size: 'small', owner: 2, garrison: 0 },
+      ],
+    });
+    for (const p of w.planets) p.production = 0;
+    run(w, 8); // 수비대가 궤도에 자리 잡게
+    const army: Unit[] = [];
+    for (let i = 0; i < 120; i++) army.push(w.spawnAt(1, 420 + (i % 10) * 5, 280 + Math.floor(i / 10) * 5, false));
+    w.enqueue({ faction: 1, unitIds: ids(army), order: { kind: 'planet', planetId: 1, formation: 'cluster' } });
+    for (let t = 0; t < 60 && army.some((u) => u.alive); t += DT) w.step(DT);
+    expect(army.every((u) => !u.alive)).toBe(true);
+    expect(w.planets[1].owner).toBe(2);
+  });
 });
 
 describe('고립(보급 단절)', () => {
@@ -171,6 +209,39 @@ describe('이동 · 대형', () => {
     expect(s.width).toBeLessThan(s.height);
   });
 
+  it('돌파·합류 슬롯은 무리가 아무리 커도 대기권 안이고, 다 들어가는 무리는 기존 고리 그대로다', () => {
+    const [lo, hi] = CONFIG.orbitBand;
+    const assaultAlts = [lo + 2, (lo + hi) / 2, hi - 2, hi - 2 + CONFIG.formation.rowSpacing];
+    for (const size of ['small', 'medium', 'large'] as const) {
+      for (const owner of [2, 1]) {
+        // 경계값: 기존 고리 정원(합류 91/117/141, 돌파 145/181/219) 바로 위, 그리고 500 까지
+        for (const n of [1, 40, 92, 100, 118, 142, 146, 182, 220, 300, 400, 500]) {
+          // owner 2 = 적 행성 돌파, owner 1 = 아군 행성 합류
+          const w = makeWorld([
+            { x: 60, y: 60, size: 'small', owner: 1 },
+            { x: 500, y: 300, size, owner, garrison: 0 },
+          ]);
+          const p = w.planets[1];
+          const army = spawnAt(w, 1, n, 200, 100);
+          w.enqueue({ faction: 1, unitIds: ids(army), order: { kind: 'planet', planetId: p.id, formation: 'cluster' } });
+          w.step(DT);
+          for (const u of army) {
+            const d = Math.hypot(u.tx - p.x, u.ty - p.y);
+            expect(d).toBeLessThan(p.atmosphereRadius);
+            expect(d).toBeGreaterThan(p.radius);
+          }
+          // 작은 돌파(대기권 안 고리 정원 이하)는 예전과 같은 고도에 선다
+          if (owner === 2 && n <= 100) {
+            for (const u of army) {
+              const alt = Math.hypot(u.tx - p.x, u.ty - p.y) - p.radius;
+              expect(assaultAlts.some((a) => Math.abs(a - alt) < 1e-6)).toBe(true);
+            }
+          }
+        }
+      }
+    }
+  });
+
   it('포위는 대기권 바로 바깥에 선다', () => {
     const w = makeWorld([
       { x: 100, y: 300, size: 'large', owner: 1 },
@@ -235,5 +306,33 @@ describe('결정론 · AI', () => {
     }
     expect(m.world.winner).not.toBeNull();
     expect(m.world.winner).toBeGreaterThan(0);
+  });
+
+  // 진영이 셋 이상이면 고르게 강한 AI 끼리 행성만 주고받다 끝나지 않을 수 있다 (가장 약한 상대부터 정리해서 끝낸다)
+  it.each([
+    ['easy', 3],
+    ['normal', 2],
+  ] as const)('여럿이 붙어도(%s, AI %i) 15분 안에 승부가 난다', (difficulty, aiCount) => {
+    const m = new Match({ aiCount, difficulty, seed: 1, autoplay: true });
+    while (m.world.winner === null && m.world.time < 900) {
+      m.step();
+      m.world.events.length = 0;
+    }
+    expect(m.world.winner).toBeGreaterThan(0);
+  }, 30_000);
+
+  it('AI 는 첫 중립 행성을 필요한 만큼만 모아 빨리 먹는다', () => {
+    // 예전에는 소형 중립(수비대 5~6)에도 보통 52기, 어려움 40기를 모성에 쌓을 때까지 기다려 41~43초 / 31~33초에야 첫 점령
+    const firstCapture = (difficulty: 'normal' | 'hard') => {
+      const m = new Match({ aiCount: 1, difficulty, seed: 1 });
+      while (m.world.time < 90) {
+        m.step();
+        for (const e of m.world.events) if (e.type === 'capture' && e.to > 1) return m.world.time;
+        m.world.events.length = 0;
+      }
+      return Infinity;
+    };
+    expect(firstCapture('normal')).toBeLessThan(39);
+    expect(firstCapture('hard')).toBeLessThan(31);
   });
 });

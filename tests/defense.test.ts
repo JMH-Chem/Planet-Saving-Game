@@ -23,6 +23,17 @@ function runUntil(m: Match, t: number, events: GameEvent[] = []): GameEvent[] {
 
 const invaders = (m: Match) => m.world.units.filter((u) => u.faction === INVADER);
 
+/** 어느 행성 대기권에도 닿지 않는 빈 우주 한 점 (병력을 세워 둘 곳) */
+function freeSpot(m: Match): { x: number; y: number } {
+  const w = m.world;
+  for (let y = 80; y < w.height - 80; y += 10) {
+    for (let x = 80; x < w.width - 80; x += 10) {
+      if (w.planets.every((p) => Math.hypot(p.x - x, p.y - y) > p.atmosphereRadius + 90)) return { x, y };
+    }
+  }
+  throw new Error('빈 자리가 없다');
+}
+
 describe('방어전 · 맵', () => {
   it('모성이 가운데, 중립 행성 10~14개가 겹치지 않게 놓이고 시드가 같으면 같은 맵', () => {
     for (const seed of [1, 2, 3, 42, 777]) {
@@ -180,23 +191,50 @@ describe('방어전 · 침공군', () => {
     expect(dist()).toBeLessThan(d0);
   });
 
-  it('전장 병력 상한에 막혀도 게이트 앞에서 멈춰 있지 않고 모인 만큼 출격한다', () => {
+  it('침공군이 상한에 닿으면 게이트가 숨을 고르고, 줄어든 만큼만 나와 곧바로 출격한다', () => {
     const m = defense();
     const w = m.world;
-    const home = w.planets[m.waves!.homeId];
-    while (w.units.length < DEFENSE.unitCap) w.spawnUnit(PLAYER, home, false);
+    const spot = freeSpot(m);
+    const parked = new Set<number>();
+    for (let i = 0; i < DEFENSE.invaderCap; i++) {
+      parked.add(w.spawnAt(INVADER, spot.x + (i % 30) * 3 - 45, spot.y + Math.floor(i / 30) * 3 - 45, false).id);
+    }
+    const fresh = () => invaders(m).filter((u) => !parked.has(u.id));
     const spec = m.waves!.schedule[0];
     runUntil(m, spec.spawnAt + 2);
-    expect(invaders(m)).toHaveLength(0);
+    expect(fresh()).toHaveLength(0);
     expect(m.world.gates).toHaveLength(1);
 
-    // 플레이어 병력이 조금 줄면 그만큼만 나와서 곧바로 출격한다
-    for (const u of w.units.filter((v) => v.faction === PLAYER).slice(0, 4)) u.hp = 0;
+    // 침공군이 4 기 줄면 딱 그만큼만 나와서 곧바로 출격한다 (한꺼번에 몰려나오지 않는다)
+    for (const u of invaders(m).filter((v) => parked.has(v.id)).slice(0, 4)) u.hp = 0;
     runUntil(m, w.time + 0.5);
-    const inv = invaders(m);
-    expect(inv.length).toBeGreaterThan(0);
-    expect(inv.length).toBeLessThan(spec.size);
-    expect(inv.every((u) => u.state === 'move')).toBe(true);
+    expect(fresh()).toHaveLength(4);
+    expect(fresh().every((u) => u.state === 'move')).toBe(true);
+    expect(m.world.gates[0].remaining).toBe(spec.size - 4);
+  });
+
+  it('플레이어 병력이 아무리 많아도 웨이브는 끝까지 나오고, 침공군을 정리하면 승리한다', () => {
+    // 예전에는 전장 전체 병력(플레이어 포함)으로 게이트를 막아, 플레이어가 1500 기를 넘기면 판이 끝나지 않았다
+    const m = defense();
+    const w = m.world;
+    const d = m.waves!;
+    const spot = freeSpot(m);
+    for (let i = 0; i < 1600; i++) w.spawnAt(PLAYER, spot.x + (i % 40) * 2.5 - 50, spot.y + Math.floor(i / 40) * 2.5 - 50, false);
+    for (let i = 0; i < 80 && !d.isFinished(w); i++) {
+      // 시간을 건너뛰며 웨이브를 불러내고, 나온 침공군은 즉시 격추 처리한다
+      w.time += 10;
+      d.update(w);
+      for (const u of invaders(m)) u.hp = 0;
+      m.step();
+      w.events = [];
+    }
+    expect(d.isFinished(w)).toBe(true);
+    expect(w.gates).toHaveLength(0);
+    expect(w.factions[INVADER].stats.produced).toBe(d.schedule.reduce((s, spec) => s + spec.size, 0));
+    expect(w.unitCount[PLAYER]).toBeGreaterThanOrEqual(1600);
+    for (const u of invaders(m)) u.hp = 0;
+    m.step();
+    expect(w.winner).toBe(PLAYER);
   });
 
   it('침공군이 빼앗은 행성은 침공군 병력을 생산한다', () => {
@@ -210,6 +248,23 @@ describe('방어전 · 침공군', () => {
 });
 
 describe('방어전 · 승패', () => {
+  it('모성은 최대 방어도가 homeDefenseMult 배로 가득 찬 채 시작하고, 회복량은 기본 최대치 기준이다', () => {
+    const m = defense();
+    const w = m.world;
+    const home = w.planets[m.waves!.homeId];
+    const base = CONFIG.planet.large.maxDefense;
+    expect(home.maxDefense).toBe(base * DEFENSE.homeDefenseMult);
+    expect(home.defense).toBe(home.maxDefense);
+    // 다른 행성은 그대로
+    expect(w.planets.filter((p) => p !== home).every((p) => p.maxDefense === CONFIG.planet[p.size].maxDefense)).toBe(true);
+
+    home.defense = 100;
+    home.lastAssaultAt = -10;
+    const before = w.time;
+    runUntil(m, before + 1);
+    expect(home.defense - 100).toBeCloseTo(base * CONFIG.regenRate * (w.time - before), 1);
+  });
+
   it('모성을 빼앗기면 바로 패배한다 (승자 = 침공군)', () => {
     const m = defense();
     runUntil(m, 5);
@@ -237,6 +292,28 @@ describe('방어전 · 승패', () => {
     m.step();
     expect(w.winner).toBe(PLAYER);
     expect(d.survived(w)).toBe(DEFENSE.totalWaves);
+  });
+
+  it('HUD 용: 남은 침공군(게이트에서 아직 안 나온 병력 포함)과 침공군 행성 수', () => {
+    const m = defense();
+    const w = m.world;
+    const d = m.waves!;
+    const spec = d.schedule[0];
+    expect(d.remainingInvaders(w)).toBe(0);
+    runUntil(m, spec.warnAt + 1);
+    expect(d.remainingInvaders(w)).toBe(spec.size); // 예고 중: 전부 게이트 안
+    runUntil(m, spec.spawnAt + 0.5);
+    expect(invaders(m).length).toBeGreaterThan(0);
+    expect(w.gates[0].remaining).toBeGreaterThan(0);
+    expect(d.remainingInvaders(w)).toBe(spec.size); // 일부는 나오고 나머지는 게이트에
+    for (const u of invaders(m).slice(0, 3)) u.hp = 0;
+    m.step();
+    expect(d.remainingInvaders(w)).toBe(spec.size - 3);
+
+    expect(d.invaderPlanets(w)).toBe(0);
+    w.capture(w.planets.find((p) => p.owner === 0)!, INVADER);
+    m.step();
+    expect(d.invaderPlanets(w)).toBe(1);
   });
 
   it('침공군 병력이 남아 있으면 마지막 웨이브 뒤에도 승리가 아니다', () => {

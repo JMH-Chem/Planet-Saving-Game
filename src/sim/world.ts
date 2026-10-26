@@ -216,7 +216,9 @@ export class World {
     let gx: number, gy: number;
     if (u.state === 'orbit') {
       const p = this.planets[u.planet];
-      u.orbitAngle += CONFIG.orbitSpeed * dt;
+      // 소유자의 병력과 침입자는 서로 반대로 돈다 (CONFIG.intruderOrbitFactor). 소유는 매 틱 다시 보므로
+      // 점령 직후 새 주인의 병력과 고립된 옛 수비대도 바로 방향이 바뀐다
+      u.orbitAngle += CONFIG.orbitSpeed * dt * (p.owner === u.faction ? 1 : CONFIG.intruderOrbitFactor);
       const r = p.radius + u.orbitAltitude;
       gx = p.x + Math.cos(u.orbitAngle) * r;
       gy = p.y + Math.sin(u.orbitAngle) * r;
@@ -389,7 +391,9 @@ export class World {
   private updatePlanets(dt: number): void {
     for (const p of this.planets) {
       if (this.time - p.lastAssaultAt > CONFIG.regenDelay) {
-        p.defense = Math.min(p.maxDefense, p.defense + p.maxDefense * CONFIG.regenRate * dt);
+        // 회복량은 크기별 기본 최대치 기준: 방어전 모성처럼 최대치만 키운 행성이 터무니없이 빨리 차오르지 않게
+        const regen = CONFIG.planet[p.size].maxDefense * CONFIG.regenRate * dt;
+        p.defense = Math.min(p.maxDefense, p.defense + regen);
       }
       if (p.owner === NEUTRAL || p.orbitCount[p.owner] >= p.capacity) continue;
       p.prodProgress += p.production * dt;

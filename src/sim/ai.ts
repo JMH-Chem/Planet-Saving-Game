@@ -1,6 +1,12 @@
-import { AI_PROFILES, type AIProfile, type Difficulty } from '../config';
+import { AI_PROFILES, AI_REINFORCE_RADIUS, type AIProfile, type Difficulty } from '../config';
 import { NEUTRAL, type FactionId, type Order, type Planet, type Unit } from './types';
 import type { World } from './world';
+
+/**
+ * 상대가 둘 이상이면 행성이 가장 적은 상대의 행성 가치에 곱하는 배율.
+ * 고르게 강한 진영 셋 이상이 서로 행성을 주고받기만 하면 판이 끝나지 않으므로 약한 쪽부터 정리한다 (1:1 에선 영향 없음)
+ */
+const WEAKEST_RIVAL_BONUS = 3;
 
 interface Operation {
   target: number;
@@ -48,6 +54,15 @@ export class AIController {
     let n = 0;
     world.grid.forEachInRadius(p.x, p.y, p.atmosphereRadius + pad, (u) => {
       if (u.alive && u.faction !== this.faction && (includeNeutral || u.faction !== NEUTRAL)) n++;
+    });
+    return n;
+  }
+
+  /** 다른 진영 행성 t 의 주인이 그 대기권 밖 가까이(AI_REINFORCE_RADIUS)에 둔 병력: 곧 증원으로 올 수 있다 */
+  private reinforcementsNear(world: World, t: Planet): number {
+    let n = 0;
+    world.grid.forEachInRadius(t.x, t.y, AI_REINFORCE_RADIUS, (u) => {
+      if (u.alive && u.faction === t.owner && u.inPlanet !== t.id) n++;
     });
     return n;
   }
@@ -126,18 +141,35 @@ export class AIController {
     if (total < 6) return;
 
     const targeted = new Set(this.ops.map((o) => o.target));
+    const rivals = world.factions.filter((f) => f.id !== NEUTRAL && f.id !== me && world.planetCount[f.id] > 0);
+    const weakest = rivals.length >= 2 ? rivals.reduce((a, b) => (world.planetCount[b.id] < world.planetCount[a.id] ? b : a)).id : -1;
     const candidates = world.planets
       .filter((t) => t.owner !== me && !targeted.has(t.id))
       .map((t) => {
         const defenders = this.hostilesNear(world, t, 10, true);
-        const need = defenders * 1.4 + t.defense / 6 + 2;
+        // 중립은 증원이 없어 수비대만 넘으면 된다: 돌파 병력은 행성만 치고 수비대는 그동안 돌파 병력을 쏘므로
+        // 수비대 × 방어도에 비례해 손실이 커진다 (sqrt 항). 수비대가 다 죽은 중립에 몇 기만 보내 시간 초과로 끝나지 않게 하한도 둔다.
+        // 다른 진영 행성은 재생산과 증원이 있으므로 방어도를 그대로 반영하고, 성향에 따라 이웃의 증원 병력도 센다
+        const { reinforceWeight } = this.profile;
+        const need =
+          t.owner === NEUTRAL
+            ? Math.max(defenders * 1.6 + 4, Math.sqrt((defenders * t.defense) / 2) + 2)
+            : (defenders + (reinforceWeight > 0 ? reinforceWeight * this.reinforcementsNear(world, t) : 0)) * 1.4 +
+              t.defense / 6 +
+              2;
         const d = Math.min(...sources.map((s) => dist(s, t)));
-        const value = t.production * 10 + (t.owner === NEUTRAL ? 0 : 2) + (t.isHome ? 3 : 0);
+        const value =
+          t.owner === NEUTRAL
+            ? t.production * 10
+            : (t.production * 10 + 2 + (t.isHome ? 3 : 0)) *
+              this.profile.enemyPressure *
+              (t.owner === weakest ? WEAKEST_RIVAL_BONUS : 1);
         return { t, defenders, need, score: value / (need + 4) / (1 + d / 400) };
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, 3);
 
+    let launched = 0;
     for (const c of candidates) {
       const wanted = Math.ceil(c.need * this.profile.attackMargin);
       const near = sources.filter((s) => dist(s, c.t) < 900).sort((a, b) => dist(a, c.t) - dist(b, c.t));
@@ -157,7 +189,8 @@ export class AIController {
         startedAt: world.time,
         initial: force.length,
       });
-      break; // 한 번 판단에 공격은 하나만
+      // 한 번 판단에 시작하는 공격 수는 성향마다 다르다 (어려움은 두 곳을 동시에 친다)
+      if (++launched >= this.profile.launchesPerThink) break;
     }
   }
 

@@ -165,20 +165,47 @@ function sendTo(u: Unit, s: Slot, planetId: number): void {
 /** a - b 를 [-π, π) 로 정규화 */
 export const angleDiff = (a: number, b: number) => ((((a - b) % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
 
+/** 대기권 안에 다 들어가지 않는 큰 무리를 위해 고리 간격을 좁힐 때의 하한 */
+const MIN_RING_SPACING = 2.5;
+
 /**
  * 행성 둘레 고리 위의 슬롯. 진입 방향(a0)을 중심으로 좌우 번갈아 채운다.
  * interleave = true 면 여러 고도에 번갈아 채워 좁고 두껍게(돌파),
  * false 면 안쪽 고리를 다 채운 뒤 바깥 고리로(포위).
+ *
+ * maxAlt 를 주면 슬롯이 그 고도(표면 기준)를 넘지 않는다: 돌파·합류는 대기권 안에 있어야 의미가 있다.
+ * 지금 고리들로 다 들어가는 수는 배치가 그대로이고, 넘칠 때만 간격을 좁히며(하한 MIN_RING_SPACING),
+ * 그래도 넘치면 바깥 대신 안쪽 고리들을 조금씩 엇갈려 한 번 더 채운다.
  */
-function ringSlots(p: Planet, n: number, a0: number, alts: number[], spacing: number, interleave: boolean): Slot[] {
+function ringSlots(
+  p: Planet,
+  n: number,
+  a0: number,
+  alts: number[],
+  spacing: number,
+  interleave: boolean,
+  maxAlt = Infinity,
+): Slot[] {
+  const { rowSpacing } = CONFIG.formation;
+  const capOf = (alt: number) => Math.max(1, Math.floor((2 * Math.PI * (p.radius + alt)) / spacing));
+  if (Number.isFinite(maxAlt)) {
+    // 주어진 고리 + 바깥으로 rowSpacing 씩 늘린 고리 중 한계 안에 드는 것들의 정원
+    let fit = 0;
+    for (const alt of alts) fit += capOf(alt);
+    for (let alt = alts[alts.length - 1] + rowSpacing; alt <= maxAlt; alt += rowSpacing) fit += capOf(alt);
+    if (n > fit) spacing = Math.max(MIN_RING_SPACING, (spacing * fit) / n);
+  }
   const slots: { x: number; y: number; a: number }[] = [];
-  const caps = alts.map((alt) => Math.max(1, Math.floor((2 * Math.PI * (p.radius + alt)) / spacing)));
+  const caps = alts.map(capOf);
   const used = alts.map(() => 0);
+  /** 안쪽 고리를 다시 채운 횟수 (간격 하한에 걸릴 만큼 큰 무리일 때만 0 보다 커진다) */
+  let pass = 0;
   const place = (band: number) => {
     const j = used[band]++;
     const k = j === 0 ? 0 : j % 2 ? (j + 1) / 2 : -j / 2;
-    const r = p.radius + alts[band];
-    const a = a0 + (k * spacing) / r;
+    // 다시 채우는 고리는 반 칸 남짓 엇갈리고 조금 안쪽으로: 같은 자리에 겹쳐 서지 않게
+    const r = p.radius + alts[band] - (pass % 2) * (rowSpacing / 4);
+    const a = a0 + (k * spacing + ((pass * 0.618) % 1) * spacing) / r;
     slots.push({ x: p.x + Math.cos(a) * r, y: p.y + Math.sin(a) * r, a });
   };
   while (slots.length < n) {
@@ -192,11 +219,17 @@ function ringSlots(p: Planet, n: number, a0: number, alts: number[], spacing: nu
       }
       placed = true;
     }
-    if (!placed) {
+    if (placed) continue;
+    const next = alts[alts.length - 1] + rowSpacing;
+    if (next <= maxAlt) {
       // 모든 고리가 찼으면 바깥으로 고리를 하나 더 만든다.
-      alts.push(alts[alts.length - 1] + CONFIG.formation.rowSpacing);
-      caps.push(Math.floor((2 * Math.PI * (p.radius + alts[alts.length - 1])) / spacing));
+      alts.push(next);
+      caps.push(capOf(next));
       used.push(0);
+    } else {
+      // 한계 고도까지 꽉 찼다: 바깥으로 내보내지 않고 안쪽 고리들을 한 번 더 채운다
+      pass++;
+      used.fill(0);
     }
   }
   return slots;
@@ -214,12 +247,18 @@ function entryAngle(units: Unit[], p: Planet): number {
   return Math.atan2(c.y - p.y, c.x - p.x);
 }
 
+/**
+ * 합류·돌파 슬롯의 최고 고도(표면 기준). 대기권(CONFIG.atmosphere) 경계에서 1 안쪽:
+ * 바깥 고리로 밀려난 병력은 강하로 치지 않아 행성을 못 치고, 아군 행성에선 수비대(presence)로 세지 않는다
+ */
+const INSIDE_ALT = CONFIG.atmosphere - 1;
+
 /** 아군 행성 궤도에 합류 */
 function joinPlanet(units: Unit[], p: Planet): void {
   const a0 = entryAngle(units, p);
   const [lo, hi] = CONFIG.orbitBand;
   const alts = [lo + 1, (lo + hi) / 2, hi - 1];
-  assignOnRing(units, p, ringSlots(p, units.length, a0, alts, 6, true), a0, p.id);
+  assignOnRing(units, p, ringSlots(p, units.length, a0, alts, 6, true, INSIDE_ALT), a0, p.id);
 }
 
 /** 돌파: 진입 방향으로 뭉쳐서 대기권 안으로 강하, 도착 후 궤도를 돌며 행성을 공격 */
@@ -227,7 +266,8 @@ function assaultPlanet(units: Unit[], p: Planet): void {
   const a0 = entryAngle(units, p);
   const [lo, hi] = CONFIG.orbitBand;
   const alts = [lo + 2, (lo + hi) / 2, hi - 2];
-  assignOnRing(units, p, ringSlots(p, units.length, a0, alts, CONFIG.formation.clusterSpacing, true), a0, p.id);
+  const slots = ringSlots(p, units.length, a0, alts, CONFIG.formation.clusterSpacing, true, INSIDE_ALT);
+  assignOnRing(units, p, slots, a0, p.id);
 }
 
 /** 포위: 대기권 바로 바깥에 넓게 펼쳐 궤도 수비대를 사거리에 넣는다 */
