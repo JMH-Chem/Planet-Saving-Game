@@ -30,8 +30,9 @@ export const CONFIG = {
     planetDamageMult: 0.6,
   },
 
+  // 소형 중립 수비대 5: 침입자 역회전(intruderOrbitFactor) 이후에도 시작 병력 13~15기의 첫 돌파가 대개 통하도록
   planet: {
-    small: { radius: 18, production: 0.5, capacity: 30, maxDefense: 80, neutralGarrison: 6 },
+    small: { radius: 18, production: 0.5, capacity: 30, maxDefense: 80, neutralGarrison: 5 },
     medium: { radius: 26, production: 0.8, capacity: 50, maxDefense: 150, neutralGarrison: 12 },
     large: { radius: 34, production: 1.1, capacity: 80, maxDefense: 240, neutralGarrison: 20 },
   } satisfies Record<PlanetSize, PlanetSpec>,
@@ -44,6 +45,12 @@ export const CONFIG = {
   surroundAltitude: 27,
   /** 궤도 회전 속도(rad/s) */
   orbitSpeed: 0.35,
+  /**
+   * 남의 행성(적·중립)을 도는 병력의 회전 배율. −1 = 수비대와 반대로 돈다.
+   * 같은 방향으로 돌면 강하한 병력과 수비대의 상대 위치가 얼어붙어, 처음 사거리 밖에 내린 병력은
+   * 끝까지 아무와도 싸우지 않는다. 반대로 돌면 서로 0.7 rad/s 로 스쳐 지나가 수비대가 침입자를 쏠 수 있다
+   */
+  intruderOrbitFactor: -1,
 
   /** 공격받지 않은 뒤 방어도 회복이 시작되기까지(초) */
   regenDelay: 2,
@@ -83,12 +90,33 @@ export interface AIProfile {
   usesStaging: boolean;
   /** 행성마다 남겨두는 예비 병력 비율(정원 대비) */
   reserveRatio: number;
+  /** 한 번 판단에 새로 시작할 수 있는 공격 수 (여유 병력이 되면 두 곳을 동시에 친다) */
+  launchesPerThink: number;
+  /** 다른 진영 행성의 공격 가치 배율 (1 보다 크면 중립을 다 먹기 전에도 상대 행성을 먼저 노린다) */
+  enemyPressure: number;
+  /**
+   * 다른 진영 행성을 칠 때, 그 진영이 주변(AI_REINFORCE_RADIUS)에 둔 병력을 이 비율만큼 수비대로 셈한다.
+   * 0 이면 궤도 수비대만 보고 들어갔다가 이웃 행성의 증원에 번번이 막힌다
+   */
+  reinforceWeight: number;
 }
 
+/** reinforceWeight 가 세는 '곧 증원으로 올 수 있는' 병력의 반경 */
+export const AI_REINFORCE_RADIUS = 300;
+
 export const AI_PROFILES: Record<Difficulty, AIProfile> = {
-  easy: { thinkInterval: 3.0, attackMargin: 2.0, usesStaging: false, reserveRatio: 0.3 },
-  normal: { thinkInterval: 1.5, attackMargin: 1.5, usesStaging: true, reserveRatio: 0.2 },
-  hard: { thinkInterval: 0.8, attackMargin: 1.25, usesStaging: true, reserveRatio: 0.12 },
+  easy: {
+    thinkInterval: 3.0, attackMargin: 2.0, usesStaging: false, reserveRatio: 0.3,
+    launchesPerThink: 1, enemyPressure: 1, reinforceWeight: 0,
+  },
+  normal: {
+    thinkInterval: 1.5, attackMargin: 1.5, usesStaging: true, reserveRatio: 0.2,
+    launchesPerThink: 1, enemyPressure: 1, reinforceWeight: 0.05,
+  },
+  hard: {
+    thinkInterval: 0.8, attackMargin: 1.25, usesStaging: true, reserveRatio: 0.12,
+    launchesPerThink: 2, enemyPressure: 1.5, reinforceWeight: 0.3,
+  },
 };
 
 /** 방어전(웨이브 침공에서 모성 지키기) 수치. 정복전 수치(CONFIG)와는 독립적으로 조정한다 */
@@ -97,6 +125,8 @@ export const DEFENSE = {
   /** 가로 화면 기준 맵 크기 (세로 화면이면 교환) */
   worldSize: [1700, 1100] as const,
   startingUnits: 12,
+  /** 모성 최대 방어도 배율 (회복 속도는 그대로). 비슷한 수의 돌파에 몇 초 만에 넘어가지 않고 증원이 닿을 시간을 준다 */
+  homeDefenseMult: 1.75,
 
   totalWaves: 12,
   /** 첫 웨이브 예고 시각(초). 그 전까지는 확장할 시간 */
@@ -110,11 +140,19 @@ export const DEFENSE = {
   /** 게이트 하나가 초당 내보내는 병력. 큰 게이트는 warpDuration 초 안에 다 나오도록 그보다 빠르게 */
   warpRate: 8,
   warpDuration: 8,
-  /** 전장 전체 병력이 이 수 이상이면 게이트 출현을 잠시 멈춘다 (성능 보호) */
-  unitCap: 1500,
+  /**
+   * 침공군 병력이 이 수 이상이면 게이트 출현을 잠시 멈춘다 (성능 보호. 침공군이 줄면 이어서 나온다).
+   * 플레이어·중립 병력은 세지 않는다: 플레이어가 병력을 쌓아 둔다고 웨이브가 멈추면 판이 끝나지 않는다
+   */
+  invaderCap: 900,
 
-  /** 웨이브 n 의 총 병력 = round((base + linear·(n−1) + quad·(n−1)²) × 난이도 배율) */
-  waveSize: { base: 10, linear: 12, quad: 5.6 },
+  /**
+   * 웨이브 n 의 총 병력 = round((base + linear·(n−1) + quad·(n−1)²) × 난이도 배율).
+   * 보통 기준 10 → 602 (총 2835). quad 5.6 일 때는 후반(570~820)이 확장을 다 해도 따라잡을 수 없는 벽이었다.
+   * 지금 값에서: 확장 + 정원 관리 + 게이트 대응을 하는 플레이어는 보통을 대개 이기고 어려움은 가끔 이긴다,
+   * 모성만 지키면 보통 5 웨이브 남짓, 자동 진행(AI)은 쉬움을 이긴다 (헤드리스 측정)
+   */
+  waveSize: { base: 10, linear: 12, quad: 3.8 },
   difficultyMult: { easy: 0.45, normal: 1.0, hard: 1.5 } satisfies Record<Difficulty, number>,
   /** 웨이브별 게이트 수: [이 웨이브부터, 게이트 수] (오름차순) */
   gatesByWave: [
@@ -138,7 +176,7 @@ export const DEFENSE = {
   siegeTimeout: 25,
   /**
    * 돌파가 assaultTimeout(초) 안에 끝나지 않거나, hopelessAfter(초) 뒤에도 수비대에 비해 가망이 없으면
-   * 가장 가까운 플레이어 병력에게 달려든다 (같은 궤도를 돌며 서로 닿지 않는 교착 방지)
+   * 가장 가까운 플레이어 병력에게 달려든다 (강하 병력은 행성만 쏘므로, 가망 없는 돌파가 수비대에게 맞기만 하며 끌지 않게)
    */
   assaultTimeout: 45,
   hopelessAfter: 15,

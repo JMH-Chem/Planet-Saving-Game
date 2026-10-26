@@ -94,6 +94,12 @@ export class WaveDirector {
     inv.invader = true;
     const home = world.planets.find((p) => p.owner === PLAYER && p.isHome) ?? world.planets.find((p) => p.owner === PLAYER);
     this.homeId = home ? home.id : -1;
+    if (home) {
+      // 모성이 넘어가면 바로 끝나므로 보통 대형 행성보다 단단하게, 처음부터 가득 찬 채로 시작한다
+      // (회복량은 기본 최대치 기준이라 더 빨리 차오르지는 않는다: World.updatePlanets)
+      home.maxDefense *= DEFENSE.homeDefenseMult;
+      home.defense = home.maxDefense;
+    }
     world.winRule = (w) => this.judge(w);
   }
 
@@ -110,6 +116,22 @@ export class WaveDirector {
   /** 모든 웨이브가 다 나왔다 (게이트가 전부 닫힘) */
   isFinished(world: World): boolean {
     return this.wave === this.totalWaves && world.gates.length === 0;
+  }
+
+  /**
+   * 남은 침공군 병력: 전장에 있는 병력 + 열린 게이트에서 아직 나오지 않은 병력 (예고 중인 게이트 포함).
+   * 마지막 웨이브 뒤 HUD 가 승리 조건(침공군 섬멸 + 빼앗긴 행성 탈환)을 보여 줄 때 쓴다
+   */
+  remainingInvaders(world: World): number {
+    // world.unitCount 는 world.step 안에서만 갱신되어 그 뒤 게이트에서 막 나온 병력이 빠지므로 직접 센다
+    let n = 0;
+    for (const u of world.units) if (u.faction === this.faction) n++;
+    return n + world.gates.reduce((s, g) => s + g.remaining, 0);
+  }
+
+  /** 침공군이 차지하고 있는 행성 수 (승리하려면 모두 되찾아야 한다) */
+  invaderPlanets(world: World): number {
+    return world.planetCount[this.faction];
   }
 
   /** 버틴 웨이브 수 (결과 화면용) */
@@ -147,7 +169,7 @@ export class WaveDirector {
   private judge(world: World): FactionId | null {
     const home = world.planets[this.homeId];
     if (!home || home.owner !== PLAYER) return this.faction;
-    if (this.isFinished(world) && world.unitCount[this.faction] === 0 && world.planetCount[this.faction] === 0) return PLAYER;
+    if (this.isFinished(world) && this.remainingInvaders(world) === 0 && this.invaderPlanets(world) === 0) return PLAYER;
     return null;
   }
 
@@ -225,6 +247,8 @@ export class WaveDirector {
    */
   private emit(world: World, t: number): void {
     const golden = Math.PI * (3 - Math.sqrt(5));
+    // 침공군 수: world.unitCount 는 world.step 안에서만 갱신되므로 이번 호출에서 내보낸 수를 직접 더한다
+    let invaders = world.unitCount[this.faction];
     for (const g of world.gates) {
       if (t < g.spawnAt) continue;
       let group = this.groups.find((gr) => gr.gateId === g.id);
@@ -232,8 +256,9 @@ export class WaveDirector {
       const due = Math.min(g.count, Math.floor((t - g.spawnAt) * rate) + 1);
       let throttled = false;
       while (g.count - g.remaining < due) {
-        // 전장 전체 병력이 상한에 닿으면 게이트가 잠시 숨을 고른다 (성능 보호. 병력이 줄면 이어서 나온다)
-        if (world.units.length >= DEFENSE.unitCap) {
+        // 침공군이 상한에 닿으면 게이트가 잠시 숨을 고른다 (성능 보호. 침공군이 줄면 이어서 나온다).
+        // 침공군만 센다: 막힌 동안에도 나와 있는 침공군은 늘 공격 중이라 언젠가 줄어든다 (영영 멈추지 않음)
+        if (invaders >= DEFENSE.invaderCap) {
           throttled = true;
           break;
         }
@@ -248,6 +273,7 @@ export class WaveDirector {
         const y = Math.min(world.height - 4, Math.max(4, g.y + Math.sin(i * golden) * r));
         const u = world.spawnAt(this.faction, x, y);
         g.remaining--;
+        invaders++;
         group.units.add(u.id);
         world.events.push({ type: 'warp', x, y, faction: this.faction, gateId: g.id });
       }
@@ -377,8 +403,8 @@ export class WaveDirector {
         continue;
       }
 
-      // 돌파가 막혔다: 궤도를 같이 도는 수비대와 서로 닿지 않으면 영영 끝나지 않으므로,
-      // 수비대에 비해 너무 적거나 오래 걸리면 가장 가까운 플레이어 병력에게 달려들어 끝장을 본다
+      // 돌파가 막혔다: 강하 중에는 행성만 쏘고 수비대는 못 쏘므로, 수비대에 비해 너무 적거나
+      // 오래 걸리면 가장 가까운 플레이어 병력에게 달려들어 끝장을 본다 (방어도만 깎다 녹아내리지 않게)
       const hopeless = units.length * 3 < target.defense && units.length < this.defendersNear(world, target) * 0.5;
       const stalled = elapsed > DEFENSE.assaultTimeout || (elapsed > DEFENSE.hopelessAfter && hopeless);
       if (stalled) {
