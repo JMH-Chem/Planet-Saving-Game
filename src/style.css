@@ -136,6 +136,14 @@ kbd {
   color: var(--muted);
 }
 
+/* 자릿수가 바뀌어도(99 → 100) 칩 폭이 그대로여야 상단 바가 줄바꿈으로 출렁이지 않는다 */
+.chip b {
+  display: inline-block;
+  min-width: 3ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .timer {
   font: 600 15px ui-monospace, monospace;
   color: var(--muted);
@@ -305,27 +313,37 @@ kbd {
 
 /* ─────────── 알림 ─────────── */
 
-.banner {
+/*
+ * 목표 지정 배너(가운데)와 토스트(오른쪽)를 한 열로 쌓는다: 배너가 떠 있으면 토스트가 그 아래로 흘러 서로 가리지 않는다.
+ * 위치는 실제로 잰 상단 바 아래 끝(--hud-top, ui/hud.ts) 바로 아래. 상단 바는 진영 수 · 화면 폭에 따라 높이가 달라진다.
+ */
+.notices {
   position: absolute;
-  top: calc(76px + var(--safe-top));
-  left: 50%;
-  transform: translateX(-50%);
+  top: calc(var(--hud-top, 64px) + 6px);
+  left: calc(12px + var(--safe-left));
+  right: calc(12px + var(--safe-right));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.banner {
+  align-self: center;
+  max-width: 100%;
   padding: 8px 16px;
   border-radius: 999px;
   background: rgba(255, 93, 93, 0.9);
   font-weight: 700;
-  pointer-events: none;
+  text-align: center;
 }
 
 .toasts {
-  position: absolute;
-  top: calc(76px + var(--safe-top));
-  right: calc(12px + var(--safe-right));
   display: flex;
   flex-direction: column;
   gap: 6px;
   align-items: flex-end;
-  pointer-events: none;
 }
 
 .toast {
@@ -726,9 +744,8 @@ kbd {
     font-size: 12px;
   }
 
+  /* 폭은 줄여도 높이 · 최소 폭은 터치 기준(40px) 그대로 */
   .icon-btn {
-    min-width: 36px;
-    height: 36px;
     padding: 0 6px;
   }
 
@@ -744,8 +761,8 @@ kbd {
     height: 32px;
   }
 
-  /* 좁은 화면: 웨이브 표시는 진영 칩 아래 줄 가운데로 */
-  .top-row:has(.wave:not([hidden])) {
+  /* 좁은 화면: 웨이브 표시는 진영 칩 아래 줄 가운데로 (알림은 늘어난 상단 바를 재서 그 아래에 온다) */
+  .top-row {
     flex-wrap: wrap;
     row-gap: 4px;
   }
@@ -760,14 +777,40 @@ kbd {
     padding: 3px 10px;
     font-size: 12px;
   }
-
-  /* 웨이브 줄만큼 상단 바가 길어지므로 알림을 그 아래로 내린다 */
-  #hud:has(.wave:not([hidden])) :is(.toasts, .banner) {
-    top: calc(118px + var(--safe-top));
-  }
 }
 
 @media (max-width: 480px) {
+  /*
+   * 세로 휴대폰: 첫 줄은 시계 + 버튼, 둘째 줄은 진영 칩 (방어전이면 그 오른쪽에 웨이브 표시).
+   * 칩이 버튼과 한 줄에 있으면 남는 폭이 100px 남짓이라 칩마다 한 줄씩 쌓이거나 버튼 밑으로 비어져 나온다.
+   * ::after 는 줄바꿈용 빈 항목
+   */
+  .top-row {
+    row-gap: 0;
+  }
+
+  .top-row::after {
+    content: '';
+    order: 1;
+    flex-basis: 100%;
+  }
+
+  .timer {
+    display: block;
+    margin-right: auto;
+  }
+
+  .faction-stats {
+    order: 2;
+    margin-top: 4px;
+  }
+
+  .wave {
+    order: 3;
+    flex-basis: auto;
+    margin-top: 4px;
+  }
+
   .command-bar button {
     font-size: 12px;
     padding: 0 3px;
@@ -787,11 +830,6 @@ kbd {
   .top-bar {
     padding-top: calc(4px + var(--safe-top));
     padding-right: calc(96px + var(--safe-right));
-  }
-
-  .icon-btn {
-    min-width: 34px;
-    height: 34px;
   }
 
   .power-bar {
@@ -833,17 +871,19 @@ kbd {
     font-size: 15px;
   }
 
-  .banner,
-  .toasts {
-    top: calc(56px + var(--safe-top));
-  }
-
   /* 방어전: 경과 시간보다 웨이브 표시가 중요하다. 한 줄에 들어가도록 시계를 숨긴다 */
   .top-row:has(.wave:not([hidden])) .timer {
     display: none;
   }
 
-  .toasts {
+  /* 폭이 720px 이하인 가로 휴대폰에서도 웨이브 표시는 버튼과 같은 줄에 (세로 공간이 더 귀하다. 넘치면 다음 줄로) */
+  .wave {
+    order: 0;
+    flex-basis: auto;
+  }
+
+  /* 오른쪽 세로 명령 바를 피한다 */
+  .notices {
     right: calc(100px + var(--safe-right));
   }
 
@@ -855,9 +895,67 @@ kbd {
     bottom: calc(6px + var(--safe-bottom));
   }
 
+  /* 메뉴 · 결과 창: 높이 390px 안팎에서도 게임 시작 버튼이 스크롤 없이 보이도록 여백을 줄인다 */
+  .overlay {
+    padding-top: calc(8px + var(--safe-top));
+    padding-bottom: calc(8px + var(--safe-bottom));
+  }
+
+  .panel {
+    padding: 14px 18px;
+    gap: 10px;
+  }
+
+  .panel h1 {
+    font-size: 26px;
+  }
+
+  .seg button,
+  .seed input,
+  .primary,
+  .ghost {
+    height: 40px;
+  }
+
+  /* 메인 메뉴는 두 열: 제목은 위 한 줄, 게임 시작 · 조작법은 마지막 줄에 나란히 (방어전이면 진영 수 칸이 빠져도) */
+  #menu .sub {
+    display: none;
+  }
+
+  #menu .panel {
+    width: min(640px, 100%);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 16px;
+    align-items: start;
+  }
+
+  #menu .panel > h1 {
+    grid-column: 1 / -1;
+  }
+
+  #btn-start {
+    grid-column: 1;
+  }
+
+  #btn-howto {
+    grid-column: 2;
+  }
+}
+
+/* 휴대폰: 진영 칩은 색 점 + 병력 수만 (이름 · 행성 수는 툴팁). 버튼과 한 줄에 들어가고 버튼 밑으로 비어져 나오지 않게 */
+@media (max-width: 720px), (max-height: 520px) and (orientation: landscape) {
+  .chip .nm,
+  .chip small {
+    display: none;
+  }
+}
+
+/* 터치: 손가락으로 누르는 버튼은 40px 이상 (미니맵 ⌂ · ⤢ 는 마우스용으로 34px) */
+@media (pointer: coarse) {
   .minimap-tools .icon-btn {
-    width: 32px;
-    min-width: 32px;
-    height: 32px;
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
   }
 }
