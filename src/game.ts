@@ -8,7 +8,8 @@ import { PLAYER, type Formation, type GameEvent, type Order, type Planet } from 
 export interface GameHooks {
   /** 매 프레임 시뮬레이션 이벤트 전달 (토스트 등) */
   onEvents?: (events: readonly GameEvent[]) => void;
-  onSelectionChange?: (count: number) => void;
+  /** 선택 수가 바뀜. byUser = 플레이어 입력으로 고름 (false = 고른 병력이 죽어서 줄어듦: 선택음을 내지 않는다) */
+  onSelectionChange?: (count: number, byUser: boolean) => void;
   onEnd?: (winner: number) => void;
   /** 매 프레임 렌더 직후 (미니맵 · 알림 갱신용, 실제 경과 초) */
   onFrame?: (dt: number) => void;
@@ -198,23 +199,27 @@ export class Game {
   private setSelection(ids: Iterable<number>, additive: boolean): void {
     if (!additive) this.selection.clear();
     for (const id of ids) this.selection.add(id);
-    this.hooks.onSelectionChange?.(this.selection.size);
+    this.hooks.onSelectionChange?.(this.selection.size, true);
   }
 
   private pruneSelection(): void {
     if (this.selection.size === 0) return;
     const before = this.selection.size;
     for (const id of this.selection) if (!this.world.getUnit(id)) this.selection.delete(id);
-    if (this.selection.size !== before) this.hooks.onSelectionChange?.(this.selection.size);
+    if (this.selection.size === before) return;
+    // 고른 병력이 다 죽으면 '전체 공격' 목표 지정도 끝난다 (빈 선택으로는 목표를 찍어도 거절음뿐이다)
+    if (this.selection.size === 0) this.overlay.targeting = false;
+    this.hooks.onSelectionChange?.(this.selection.size, false);
   }
 
-  /** 월드 좌표 사각형 안의 아군 병력 */
+  /** 월드 좌표 사각형 안의 아군 병력. 상자로 새로 고르면 '전체 공격' 목표 지정은 끝난다 (다음 클릭이 명령이 되지 않게) */
   selectInRect(x0: number, y0: number, x1: number, y1: number, additive: boolean): void {
     const minX = Math.min(x0, x1), maxX = Math.max(x0, x1);
     const minY = Math.min(y0, y1), maxY = Math.max(y0, y1);
     const ids = this.world.units
       .filter((u) => u.faction === PLAYER && u.x >= minX && u.x <= maxX && u.y >= minY && u.y <= maxY)
       .map((u) => u.id);
+    this.overlay.targeting = false;
     this.setSelection(ids, additive);
   }
 
@@ -332,11 +337,15 @@ export class Game {
     }
     const ok = this.send({ kind: 'line', x1, y1, x2, y2 });
     if (ok && n > 0) this.renderer.orderFeedback({ x0: cx / n, y0: cy / n, x1, y1, x2, y2, kind: 'line', count: n });
+    // 소리는 commandAt 처럼 입력 장치와 상관없이 여기서: 고른 병력이 없으면 거절음
     if (ok) sfx.order('line');
+    else sfx.ui('deny');
     return ok;
   }
 
   commandReturn(): boolean {
+    // 다른 명령을 내렸으니 '전체 공격' 목표 지정은 끝낸다 (commandAt · commandLine 과 같다)
+    this.overlay.targeting = false;
     // 시뮬레이션과 같은 규칙(각자 가장 가까운 아군 행성)으로 묶어서, 귀환할 행성마다 경로를 보여 준다
     const groups = new Map<Planet, { x: number; y: number; n: number }>();
     const friendly = this.world.planets.filter((p) => p.owner === PLAYER);
@@ -364,14 +373,17 @@ export class Game {
       for (const [p, g] of groups) {
         this.renderer.orderFeedback({ x0: g.x / g.n, y0: g.y / g.n, x1: p.x, y1: p.y, kind: 'return', count: g.n, radius: p.radius });
       }
+    } else {
+      sfx.ui('deny');
     }
     return ok;
   }
 
-  /** 전체 선택 후 목표 지정 대기 */
+  /** 전체 선택 후 목표 지정 대기. 병력이 하나도 없으면 시작할 수 없다 (거절음: 키보드 G 와 버튼이 같은 소리) */
   attackAll(): void {
     this.selectAll();
     this.overlay.targeting = this.selection.size > 0;
+    if (!this.overlay.targeting) sfx.ui('deny');
   }
 
   toggleFormation(): Formation {

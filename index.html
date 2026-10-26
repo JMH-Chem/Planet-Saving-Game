@@ -30,8 +30,11 @@
         </header>
 
         <div id="alert-arrows" class="alert-arrows"></div>
-        <div id="banner" class="banner" hidden></div>
-        <div id="toasts" class="toasts"></div>
+        <!-- 목표 지정 배너가 떠 있으면 토스트는 그 아래로 흐른다 (서로 가리지 않게 한 열로 쌓는다) -->
+        <div class="notices">
+          <div id="banner" class="banner" hidden></div>
+          <div id="toasts" class="toasts"></div>
+        </div>
         <div id="paused-tag" class="paused-tag" hidden>일시정지</div>
 
         <footer class="command-bar">
@@ -108,6 +111,12 @@
             <li><b>방어막은 궤도 수비대가 유지한다.</b> 행성 피해 = 공격측 ÷ (공격측 + 수비측). 압도적인 수로 돌파하거나, 포위로 수비대를 먼저 깎아라.</li>
             <li><b>방어도 0 → 점령.</b> 그 순간 궤도를 지키던 적 병력은 <em>고립</em>되어 체력이 줄고 공격력이 반감된다. 대신 대기권 안에 남아 행성을 되찾으려 한다.</li>
           </ol>
+          <h2>승리 조건</h2>
+          <ul class="rules">
+            <li><b>정복전</b> — 적 진영의 행성과 병력을 모두 없애면 승리. 내 행성과 병력이 모두 사라지면 패배.</li>
+            <li><b>방어전</b> — 침공군이 <b data-defense="totalWaves">12</b>번의 웨이브로 몰려온다. 웨이브마다 맵 가장자리에 <em>워프 게이트</em>가 먼저 열리고, <span data-defense="warningLead">12</span>초 뒤 그곳에서 병력이 쏟아진다 (상단 웨이브 표시 · 접근 알림에 규모와 게이트 수).</li>
+            <li><b>모성을 빼앗기면</b> 다른 행성이 남아 있어도 즉시 패배. 마지막 웨이브가 다 나온 뒤 <em>남은 침공군 병력</em>과 <em>침공군이 차지한 행성</em>까지 모두 없애야 승리.</li>
+          </ul>
           <h2>조작</h2>
           <table class="controls">
             <thead><tr><th></th><th>PC</th><th>모바일</th></tr></thead>
@@ -115,12 +124,14 @@
               <tr><td>범위 선택</td><td>좌클릭 드래그 (Shift: 추가)</td><td>한 손가락 드래그</td></tr>
               <tr><td>행성 병력 선택</td><td>아군 행성 클릭</td><td>탭 (선택 없을 때) / 길게 누르기</td></tr>
               <tr><td>주변 전부 선택</td><td>더블클릭</td><td>더블탭</td></tr>
-              <tr><td>이동 · 공격</td><td>우클릭</td><td>탭 (선택 있을 때)</td></tr>
+              <tr><td>이동 · 공격</td><td>우클릭 (미니맵 우클릭도 그곳으로)</td><td>탭 (선택 있을 때)</td></tr>
               <tr><td>횡대로 펼치기</td><td>우클릭 드래그로 선 긋기</td><td>대형 '산개' 후 탭</td></tr>
               <tr><td>대형 전환</td><td>F</td><td>대형 버튼</td></tr>
+              <tr><td>명령</td><td>A 전체 선택 · Q 절반 · Esc 해제 · G 전체 공격 → 목표 클릭 · R 귀환</td><td>명령 버튼 (전체 공격 → 목표 탭, 해제로 취소)</td></tr>
               <tr><td>카메라</td><td>휠 확대 · 화면 가장자리/방향키/가운데 드래그로 이동 · 미니맵 클릭/드래그 · H 모성 · Z 전체 보기 · 부대 번호 두 번 = 그 부대로</td><td>두 손가락 이동/확대 · 미니맵 탭/드래그 · ⌂ 모성 · ⤢ 전체 보기</td></tr>
               <tr><td>부대 지정</td><td>Ctrl+1~9 지정, 1~9 호출</td><td>—</td></tr>
-              <tr><td>기타</td><td>A 전체 · Q 절반 · Esc 해제 · G 전체공격 · R 귀환 · 미니맵 우클릭 = 그곳으로 명령 · Space 알림 위치로 · P 정지 · Tab 배속</td><td>하단 버튼 · 화면 가장자리 알림 화살표 탭 = 그곳으로</td></tr>
+              <tr><td>알림</td><td>Space 알림 위치로 (거듭 누르면 다음 알림)</td><td>화면 가장자리 알림 화살표 탭</td></tr>
+              <tr><td>진행</td><td>P 일시정지 · Tab 배속 · M 소리</td><td>상단 ❚❚ · 1× · ♪ 버튼</td></tr>
             </tbody>
           </table>
           <p class="tip">대형이 <b>집중</b>이면 적 행성 지정 = <b>돌파</b>(대기권으로 뭉쳐서 강하), <b>산개</b>면 = <b>포위</b>(대기권 바로 밖에 둘러서서 수비대와 교전).</p>

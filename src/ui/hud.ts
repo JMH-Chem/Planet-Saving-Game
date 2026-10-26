@@ -7,6 +7,7 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 /** 게임 중 DOM HUD (상단 진영 현황, 하단 명령 바, 알림) */
 export class Hud {
   readonly root = $('hud');
+  private topBar = this.root.querySelector<HTMLElement>('.top-bar')!;
   private stats = $('faction-stats');
   private power = $('power-bar');
   private timer = $('timer');
@@ -18,6 +19,7 @@ export class Hud {
   private speedBtn = $<HTMLButtonElement>('btn-speed');
   private pausedTag = $('paused-tag');
   private banner = $('banner');
+  private bannerText: string | null = null;
   private toasts = $('toasts');
 
   show(visible: boolean): void {
@@ -29,12 +31,11 @@ export class Hud {
    * 미니맵은 전장 위에 떠 있는 창이라 빼지 않는다.
    */
   insets() {
-    const topBar = this.root.querySelector<HTMLElement>('.top-bar')!;
-    const top = topBar.getBoundingClientRect().bottom + 6;
+    const top = this.topBar.getBoundingClientRect().bottom + 6;
     const bar = this.root.querySelector('.command-bar')!.getBoundingClientRect();
     const vertical = bar.height > bar.width;
     // 상단 바의 좌우 패딩 = 12px + 노치(safe-area). 가로로 눕힌 휴대폰에서 노치 밑을 전장 영역에서 뺀다
-    const cs = getComputedStyle(topBar);
+    const cs = getComputedStyle(this.topBar);
     return {
       top,
       bottom: vertical ? window.innerHeight - bar.bottom + 6 : window.innerHeight - bar.top + 8,
@@ -49,9 +50,11 @@ export class Hud {
     const total = world.unitCount.reduce((s, n, f) => (f === NEUTRAL ? s : s + n), 0) || 1;
     for (const f of world.factions) {
       if (f.id === NEUTRAL) continue;
+      // 휴대폰에서는 색 점 + 병력 수만 보인다 (이름 · 행성 수는 CSS 로 숨기고 툴팁에 남긴다)
+      const units = world.unitCount[f.id], planets = world.planetCount[f.id];
       chips.push(
-        `<span class="chip${f.alive ? '' : ' dead'}"><i style="background:${f.color}"></i>${f.name}` +
-          ` <b>${world.unitCount[f.id]}</b><small>· 행성 ${world.planetCount[f.id]}</small></span>`,
+        `<span class="chip${f.alive ? '' : ' dead'}" title="${f.name} · 병력 ${units} · 행성 ${planets}">` +
+          `<i style="background:${f.color}"></i><span class="nm">${f.name}</span> <b>${units}</b><small>· 행성 ${planets}</small></span>`,
       );
       bars.push(`<span style="background:${f.color};flex-grow:${world.unitCount[f.id] / total}"></span>`);
     }
@@ -87,9 +90,33 @@ export class Hud {
     this.wave.classList.toggle('alert', alert);
   }
 
+  /** 매 프레임 불려도 되도록 바뀔 때만 DOM 을 건드린다 */
   setBanner(text: string | null): void {
+    if (text === this.bannerText) return;
+    this.bannerText = text;
     this.banner.hidden = !text;
     if (text) this.banner.textContent = text;
+  }
+
+  /** 이전 판의 토스트 · 배너를 지운다 (토스트마다 걸린 타이머는 떼어낸 요소에만 작용하므로 그대로 둔다) */
+  reset(): void {
+    this.toasts.replaceChildren();
+    this.setBanner(null);
+  }
+
+  /**
+   * 상단 바 높이는 진영 수 · 화면 폭 · 웨이브 표시에 따라 달라진다. 실제 아래 끝을 재서 --hud-top 에 두고
+   * (토스트 · 배너가 그 바로 아래에 온다) 바뀔 때마다 알린다 (카메라 여백 갱신용). HUD 가 숨겨져 있을 땐 재지 않는다.
+   */
+  watchTopBar(onChange: () => void): void {
+    let last = -1;
+    new ResizeObserver(() => {
+      const bottom = Math.ceil(this.topBar.getBoundingClientRect().bottom);
+      if (bottom <= 0 || bottom === last) return;
+      last = bottom;
+      this.root.style.setProperty('--hud-top', `${bottom}px`);
+      onChange();
+    }).observe(this.topBar, { box: 'border-box' });
   }
 
   toast(text: string, color: string, ms = 2600): void {
