@@ -236,8 +236,10 @@ export class Game {
     return ids.length;
   }
 
+  /** 거절음은 키보드(A)와 버튼이 같은 소리를 내도록 여기서 낸다 (전체 공격도 이걸 거친다) */
   selectAll(): void {
     this.setSelection(this.world.units.filter((u) => u.faction === PLAYER).map((u) => u.id), false);
+    if (this.selection.size === 0) sfx.ui('deny');
   }
 
   clearSelection(): void {
@@ -247,7 +249,10 @@ export class Game {
 
   /** 선택을 절반으로 (행성/위치 그룹마다 고르게 남긴다) */
   halveSelection(): void {
-    if (this.selection.size <= 1) return;
+    if (this.selection.size <= 1) {
+      sfx.ui('deny');
+      return;
+    }
     const groups = new Map<number, number[]>();
     for (const id of this.selection) {
       const u = this.world.getUnit(id);
@@ -307,8 +312,8 @@ export class Game {
     if (ok && n > 0) {
       const x0 = cx / n, y0 = cy / n;
       if (spread) {
-        // orders.ts 와 같은 모양: 목표가 가운데, 무게중심 → 목표 방향에 수직, 반폭 130
-        const HALF = 130;
+        // orders.ts 와 같은 모양: 목표가 가운데, 무게중심 → 목표 방향에 수직
+        const HALF = CONFIG.formation.spreadHalfWidth;
         const len = Math.hypot(t.x - x0, t.y - y0);
         const [dx, dy] = len < 1e-3 ? [1, 0] : [(t.x - x0) / len, (t.y - y0) / len];
         const a = inside(t.x - dy * HALF, t.y + dx * HALF), b = inside(t.x + dy * HALF, t.y - dx * HALF);
@@ -379,11 +384,10 @@ export class Game {
     return ok;
   }
 
-  /** 전체 선택 후 목표 지정 대기. 병력이 하나도 없으면 시작할 수 없다 (거절음: 키보드 G 와 버튼이 같은 소리) */
+  /** 전체 선택 후 목표 지정 대기. 병력이 하나도 없으면 시작할 수 없다 (거절음은 selectAll 이 낸다) */
   attackAll(): void {
     this.selectAll();
     this.overlay.targeting = this.selection.size > 0;
-    if (!this.overlay.targeting) sfx.ui('deny');
   }
 
   toggleFormation(): Formation {

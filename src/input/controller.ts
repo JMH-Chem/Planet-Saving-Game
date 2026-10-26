@@ -53,6 +53,8 @@ const KEY_PAN_SPEED = 600;
 export interface InputHooks {
   /** 키보드 단축키 중 UI 쪽에서 처리해야 하는 것 (일시정지, 대형 표시, 알림 위치 등) */
   onKey?: (action: 'pause' | 'formation' | 'speed' | 'alert') => void;
+  /** 대화창이 떠 있는지. 떠 있는 동안에는 이미 누르고 있던 방향키로도 카메라가 움직이지 않는다 */
+  isBlocked?: () => boolean;
 }
 
 /**
@@ -576,6 +578,11 @@ export class InputController {
 
   private panWithKeys(dt: number): void {
     if (this.keysDown.size === 0) return;
+    // 대화창이 열리면 keydown 은 main.ts 가 막지만 keyup 은 막지 않으므로, 눌려 있던 키는 여기서 잊는다
+    if (this.hooks.isBlocked?.()) {
+      this.keysDown.clear();
+      return;
+    }
     const k = this.keysDown;
     const v = KEY_PAN_SPEED * dt;
     const dx = (k.has('ArrowLeft') ? v : 0) - (k.has('ArrowRight') ? v : 0);

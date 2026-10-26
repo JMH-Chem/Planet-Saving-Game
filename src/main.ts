@@ -6,8 +6,6 @@ import { InputController } from './input/controller';
 import { Minimap } from './render/minimap';
 import type { MatchSettings } from './sim/match';
 import { PLAYER, type GameEvent, type GameMode } from './sim/types';
-import type { WaveDirector } from './sim/waves';
-import type { World } from './sim/world';
 import { Alerts } from './ui/alerts';
 import { Hud } from './ui/hud';
 
@@ -106,7 +104,7 @@ function startMatch(s: MatchSettings): void {
   });
   game = g;
   if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { __game: g, __sfx: sfx });
-  input = new InputController(canvas, g, { onKey: handleKey });
+  input = new InputController(canvas, g, { onKey: handleKey, isBlocked: dialogOpen });
   const avoid = ['minimap', 'minimap-tools', 'toasts', 'banner'].map((id) => $(id));
   alerts = new Alerts($('alert-arrows'), g, avoid, (text, color) => hud.toast(text, color));
   minimap = new Minimap($<HTMLCanvasElement>('minimap'), g, alerts);
@@ -223,25 +221,14 @@ function syncWave(): void {
   } else if (next !== null && (waves.warned || !waves.inProgress)) {
     hud.setWave(`${head} · 다음 ${clock(next - w.time)}`, waves.warned);
   } else if (next === null) {
-    const left = invaderTally(waves, w);
-    if (left.units > 0) hud.setWave(`${head} · 침공군 ${left.units}기 남음`);
-    else if (left.planets > 0) hud.setWave(`${head} · 침공군 행성 ${left.planets}곳 탈환`);
+    const units = waves.remainingInvaders(w);
+    const planets = waves.invaderPlanets(w);
+    if (units > 0) hud.setWave(`${head} · 침공군 ${units}기 남음`);
+    else if (planets > 0) hud.setWave(`${head} · 침공군 행성 ${planets}곳 탈환`);
     else hud.setWave(`${head} · 진행 중`);
   } else {
     hud.setWave(`${head} · 진행 중`);
   }
-}
-
-/** WaveDirector 의 남은 침공군 집계 (병력 = 전장 + 게이트에서 아직 안 나온 수, 행성 = 침공군 행성 수) */
-type InvaderTally = Partial<Record<'remainingInvaders' | 'invaderPlanets', (world: World) => number>>;
-
-/** 집계 메서드가 없는 WaveDirector 에서도 돌도록, 없으면 같은 값을 월드에서 직접 센다 */
-function invaderTally(waves: WaveDirector, w: World): { units: number; planets: number } {
-  const t = waves as WaveDirector & InvaderTally;
-  return {
-    units: t.remainingInvaders?.(w) ?? w.unitCount[waves.faction] + w.gates.reduce((s, g) => s + g.remaining, 0),
-    planets: t.invaderPlanets?.(w) ?? w.planetCount[waves.faction],
-  };
 }
 
 function syncBanner(): void {
@@ -287,10 +274,8 @@ function runCommand(cmd: string): void {
   switch (cmd) {
     case 'select-all':
       g.selectAll();
-      if (g.selection.size === 0) sfx.ui('deny');
       break;
     case 'halve':
-      if (g.selection.size <= 1) sfx.ui('deny');
       g.halveSelection();
       break;
     case 'clear':
@@ -407,13 +392,15 @@ $('btn-retry').addEventListener('click', () => {
 });
 $('btn-to-menu').addEventListener('click', showMenu);
 
+const dialogOpen = () => !(menu.hidden && help.hidden && confirmBox.hidden && result.hidden);
+
 // 대화창(메뉴 · 도움말 · 나가기 확인 · 결과)이 떠 있는 동안 게임 단축키(P · G · 방향키 …)가 가려진 판을 움직이지 않게,
 // window 버블 단계에서 듣는 입력 컨트롤러보다 먼저(캡처 단계) 전파를 끊는다. 기본 동작은 막지 않으므로
 // Tab · Enter · Space 는 대화창 안의 버튼을 다루고, 시드 입력칸 타이핑과 M(소리)은 그대로 된다. Esc 는 도움말 · 확인창을 닫는다.
 window.addEventListener(
   'keydown',
   (e) => {
-    if (menu.hidden && help.hidden && confirmBox.hidden && result.hidden) return;
+    if (!dialogOpen()) return;
     if (e.target instanceof HTMLInputElement || e.code === 'KeyM') return;
     e.stopPropagation();
     if (e.code !== 'Escape') return;

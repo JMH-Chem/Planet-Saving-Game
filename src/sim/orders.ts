@@ -25,7 +25,8 @@ export function applyCommand(world: World, cmd: Command): void {
         assignByAxis(units, clusterSlots(units.length, t.x, t.y), px, py, -1);
       } else {
         const { dx, dy } = travelAxes(units, t.x, t.y);
-        lineOrder(units, t.x - dy * 130, t.y + dx * 130, t.x + dy * 130, t.y - dx * 130, world);
+        const half = CONFIG.formation.spreadHalfWidth;
+        lineOrder(units, t.x - dy * half, t.y + dx * half, t.x + dy * half, t.y - dx * half, world);
       }
       return;
     }

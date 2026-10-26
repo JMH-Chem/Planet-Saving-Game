@@ -72,6 +72,8 @@ export const CONFIG = {
     clusterSpacing: 5.5,
     lineSpacing: 7,
     lineMaxWidth: 260,
+    /** 빈 우주에 산개로 이동할 때 횡대의 반폭 (명령 피드백도 같은 값을 쓴다) */
+    spreadHalfWidth: 130,
     rowSpacing: 7,
   },
 } as const;
