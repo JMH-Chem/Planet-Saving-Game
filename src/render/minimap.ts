@@ -9,8 +9,8 @@ const BASE_FPS = 12;
 const PAD = 5;
 /** 병력 점은 이 수까지만 그린다 (넘으면 고르게 건너뛴다) */
 const MAX_DOTS = 2500;
-/** 이만큼 움직이면 탭이 아니라 드래그 */
-const DRAG_PX = 4;
+/** 이만큼 움직이면 탭이 아니라 드래그 (손가락은 떨림이 커서 더 넉넉하게 — 목표 지정 탭이 드래그로 사라지지 않게) */
+const DRAG_PX = { mouse: 4, touch: 8 };
 const TWO_PI = Math.PI * 2;
 const GATE_FALLBACK_COLOR = '#f472d0';
 
@@ -24,6 +24,7 @@ interface Ping {
 /**
  * 오른쪽 아래 미니맵: 맵 전체(행성 · 병력 · 워프 게이트 · 알림 핑)와 지금 보고 있는 영역.
  * 탭/클릭 = 그곳으로 부드럽게 이동, 드래그 = 바로 따라 이동, 우클릭 = 선택 병력에 그 지점 명령.
+ * 목표 지정(전체 공격) 중에는 탭/클릭이 그 지점 명령이고, 드래그는 여전히 화면 이동이다 (목표를 찾아 둘러볼 수 있게).
  *
  * 캔버스 두 장을 겹친다: 아래(#minimap)는 병력 · 행성을 BASE_FPS 로만, 위(투명)는 시점 사각형 · 핑을 매 프레임.
  * 한 장에 매 프레임 drawImage 로 합성하는 것보다 싸다 (합성은 브라우저가 한다).
@@ -48,8 +49,14 @@ export class Minimap {
   private drawn = { x: NaN, y: NaN, zoom: NaN };
   private wasAnimating = false;
   private pings: Ping[] = [];
-  private drag: { id: number; sx: number; sy: number; dragging: boolean } | null = null;
+  private drag: { id: number; sx: number; sy: number; slop: number; dragging: boolean } | null = null;
   private disposers: (() => void)[] = [];
+  /**
+   * 지금 devicePixelRatio 에만 맞는 미디어 쿼리. 창 크기는 그대로 배율만 바뀌면(배율이 다른 모니터로 창을 옮기는 등)
+   * resize 가 오지 않는 브라우저가 있어, 이 쿼리가 풀리면 다시 맞추고 새 배율로 다시 건다
+   */
+  private dprQuery: MediaQueryList | null = null;
+  private readonly onDprChange = () => this.layout();
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -65,6 +72,10 @@ export class Minimap {
     this.listen('pointermove', (e) => this.onMove(e as PointerEvent));
     this.listen('pointerup', (e) => this.onUp(e as PointerEvent));
     this.listen('pointercancel', () => (this.drag = null));
+    // 놓기를 놓친 드래그 (alt-tab 등): 남아 있으면 버튼 없이 미니맵 위를 지나가기만 해도 화면이 따라간다
+    this.listen('lostpointercapture', (e) => {
+      if (this.drag?.id === (e as PointerEvent).pointerId) this.drag = null;
+    });
     this.listen('contextmenu', (e) => e.preventDefault());
     this.listen('wheel', (e) => this.onWheel(e as WheelEvent), { passive: false });
   }
@@ -72,6 +83,8 @@ export class Minimap {
   dispose(): void {
     for (const d of this.disposers) d();
     this.disposers = [];
+    this.dprQuery?.removeEventListener('change', this.onDprChange);
+    this.dprQuery = null;
     this.top.remove();
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -94,6 +107,7 @@ export class Minimap {
     this.canvas.style.width = `${this.w + this.border * 2}px`;
     this.canvas.style.height = `${this.h + this.border * 2}px`;
     this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.watchDpr();
     for (const c of [this.canvas, this.top]) {
       c.width = Math.round(this.w * this.dpr);
       c.height = Math.round(this.h * this.dpr);
@@ -105,6 +119,14 @@ export class Minimap {
     this.canvas.closest<HTMLElement>('#hud')?.style.setProperty('--minimap-reserve', `${Math.ceil(window.innerWidth - rect.left + 12)}px`);
     this.baseAge = Infinity;
     this.drawn.x = NaN;
+  }
+
+  private watchDpr(): void {
+    const media = `(resolution: ${window.devicePixelRatio || 1}dppx)`;
+    if (this.dprQuery?.media === media) return;
+    this.dprQuery?.removeEventListener('change', this.onDprChange);
+    this.dprQuery = window.matchMedia(media);
+    this.dprQuery.addEventListener('change', this.onDprChange);
   }
 
   /** 미니맵 위 짧은 표시 (미니맵으로 내린 명령 지점 등) */
@@ -321,16 +343,15 @@ export class Minimap {
 
   private onDown(e: PointerEvent): void {
     e.preventDefault();
-    const g = this.game;
-    const p = this.toWorld(e);
-    // RTS 관례: 미니맵 우클릭 = 그 지점으로 명령. 목표 지정(전체 공격) 중이면 클릭/탭도 명령
-    if ((e.pointerType === 'mouse' && e.button === 2) || g.overlay.targeting) {
-      if (g.commandAt(p.x, p.y)) this.ping(p.x, p.y, g.world.factions[PLAYER].color);
+    // RTS 관례: 미니맵 우클릭 = 그 지점으로 명령 (누르는 순간)
+    if (e.pointerType === 'mouse' && e.button === 2) {
+      this.command(this.toWorld(e));
       return;
     }
     if (e.pointerType === 'mouse' && e.button !== 0) return;
+    // 목표 지정 중이어도 여기서 바로 명령하지 않는다: 탭인지 드래그(둘러보기)인지는 뗄 때 안다
     this.canvas.setPointerCapture?.(e.pointerId);
-    this.drag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, dragging: false };
+    this.drag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, slop: e.pointerType === 'mouse' ? DRAG_PX.mouse : DRAG_PX.touch, dragging: false };
   }
 
   private onMove(e: PointerEvent): void {
@@ -338,7 +359,7 @@ export class Minimap {
     if (!d || d.id !== e.pointerId) return;
     const p = this.toWorld(e);
     if (!d.dragging) {
-      if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < DRAG_PX) return;
+      if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < d.slop) return;
       d.dragging = true;
       // 전체 보기 상태였다면 배율은 부드럽게 당겨오고, 위치는 아래 jumpTo 로 손을 바로 따라간다
       this.game.focusOn(p.x, p.y);
@@ -350,9 +371,17 @@ export class Minimap {
     const d = this.drag;
     if (!d || d.id !== e.pointerId) return;
     this.drag = null;
+    // 드래그는 화면만 옮긴다 (목표 지정은 그대로 남아 다음 탭이 목표가 된다)
     if (d.dragging) return;
     const p = this.toWorld(e);
-    this.game.focusOn(p.x, p.y);
+    // 목표 지정(전체 공격) 중의 탭/클릭 = 그 지점 명령. 뗄 때 다시 보므로 누른 사이 Esc 로 취소했으면 그냥 이동
+    if (this.game.overlay.targeting) this.command(p);
+    else this.game.focusOn(p.x, p.y);
+  }
+
+  private command(p: { x: number; y: number }): void {
+    const g = this.game;
+    if (g.commandAt(p.x, p.y)) this.ping(p.x, p.y, g.world.factions[PLAYER].color);
   }
 
   /** 미니맵 위 휠 = 보이는 영역 중심 기준 확대/축소 */
