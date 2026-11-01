@@ -1,8 +1,12 @@
+import type { Bloom } from './bloom';
 import { drawSprite, glowSprite, mixHex, softSprite, withAlpha } from './sprites';
 
 // 짧게 살다 사라지는 시각 효과 전부 (레이저, 섬광, 불꽃, 파편, 연기, 충격파, 방어막 피격, 떠오르는 글자).
 // 대규모 전투에서 초당 수천 개가 생기므로 입자는 고정 크기 배열(SoA)에 담아 객체를 만들지 않고,
 // 그릴 때는 색 · 밝기 단계별로 경로를 묶어 한 번에 칠한다.
+// 발광(bloom)이 켜져 있으면 레이저 · 섬광 · 충격파 · 방어막 호를 같은 반복에서 발광 버퍼에도 그린다.
+// 예전에 화면에 직접 긋던 넓은 반투명 '바깥 빛'(레이저 · 고리 · 방어막 호)은 발광이 대신한다: 넓은 반투명 선은
+// 채우는 넓이만큼 비싸서(약한 GPU · 소프트웨어 래스터에서 특히), 발광이 꺼진 품질 낮음에서도 긋지 않는다.
 
 /** 월드 좌표의 보이는 영역 (여유 포함) */
 export interface ViewRect {
@@ -24,6 +28,8 @@ const EMBER = 4;
 /** 레이저 밝기 단계 수 (나이에 따라 묶어서 그린다) */
 const BEAM_BUCKETS = 2;
 const SPARK_BUCKETS = 3;
+/** 발광 버퍼의 섬광 밝기 단계 수 */
+const FLASH_BUCKETS = 3;
 
 interface Beam {
   x1: number;
@@ -315,14 +321,21 @@ export class Effects {
     });
   }
 
-  /** 가산 합성: 레이저, 섬광, 불꽃, 불티, 충격파, 방어막 호 (병력 위) */
-  drawGlow(ctx: CanvasRenderingContext2D, view: ViewRect, zoom: number): void {
+  /**
+   * 가산 합성: 레이저, 섬광, 불꽃, 불티, 충격파, 방어막 호 (병력 위). bloom = 켜져 있으면 발광 버퍼에도 그린다
+   */
+  drawGlow(ctx: CanvasRenderingContext2D, view: ViewRect, zoom: number, bloom: Bloom | null): void {
     ctx.globalCompositeOperation = 'lighter';
     const px = 1 / zoom;
     // 얇은 선은 둥근 끝이 보이지도 않으면서 소프트웨어 래스터에서는 꽤 비싸다
     ctx.lineCap = 'butt';
+    const bg = bloom?.g ?? null;
+    if (bg) {
+      bg.globalCompositeOperation = 'lighter';
+      bg.lineCap = 'butt';
+    }
 
-    // 레이저: 색 · 밝기 단계별로 묶어서 넓은 빛 → 밝은 심 순서로
+    // 레이저: 색 · 밝기 단계별로 묶어서 밝은 심 (번지는 빛은 발광 버퍼에서)
     if (this.beamCount > 0) {
       const paths: (Path2D | undefined)[] = [];
       for (let j = 0; j < this.beamCount; j++) {
@@ -333,21 +346,24 @@ export class Effects {
         const p = paths[key] ?? (paths[key] = new Path2D());
         p.moveTo(b.x1, b.y1);
         p.lineTo(b.x2, b.y2);
+        if (bloom) bloom.mark((b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2, Math.hypot(b.x2 - b.x1, b.y2 - b.y1) / 2 + 2);
       }
-      const glowW = Math.max(4.5 * px, 2);
       const coreW = Math.max(1.4 * px, 0.6);
       paths.forEach((p, key) => {
         if (!p) return;
         const c = Math.floor(key / BEAM_BUCKETS);
         const fade = 1 - (key % BEAM_BUCKETS) / BEAM_BUCKETS;
-        ctx.globalAlpha = 0.3 * fade;
-        ctx.strokeStyle = this.colors[c];
-        ctx.lineWidth = glowW;
-        ctx.stroke(p);
         ctx.globalAlpha = 0.95 * fade;
         ctx.strokeStyle = this.hot[c];
         ctx.lineWidth = coreW;
         ctx.stroke(p);
+        if (bg && bloom) {
+          // 발광 버퍼에서 약 1.5px 굵기 (흐리면 레이저를 따라 번지는 빛이 된다)
+          bg.globalAlpha = 0.4 * fade;
+          bg.strokeStyle = this.colors[c];
+          bg.lineWidth = 1.5 * bloom.unit;
+          bg.stroke(p);
+        }
       });
     }
 
@@ -374,7 +390,10 @@ export class Effects {
       ctx.stroke(p);
     });
 
-    // 섬광 · 불티: 미리 구운 발광 스프라이트
+    // 섬광 · 불티: 미리 구운 발광 스프라이트.
+    // 발광 버퍼에는 섬광마다 스프라이트를 찍는 대신 색 · 밝기 단계별로 네모를 모아 한 번에 칠한다 (버퍼에서는 몇 px 짜리라
+    // 흐리고 나면 둥근 빛과 구별되지 않고, 수백 번의 그리기가 몇 번으로 준다)
+    const flashPaths: (Path2D | undefined)[] = [];
     for (let i = 0; i < this.n; i++) {
       const k = this.kind[i];
       if (k !== FLASH && k !== EMBER) continue;
@@ -382,14 +401,34 @@ export class Effects {
       if (!inView(view, x, y, 30)) continue;
       const t = this.age[i] / this.life[i];
       let r: number;
+      const color = this.colors[this.col[i]];
       if (k === FLASH) {
         r = this.size[i] * (0.75 + 0.5 * t);
-        ctx.globalAlpha = (1 - t) * (1 - t) * 0.85;
+        const a = (1 - t) * (1 - t);
+        ctx.globalAlpha = a * 0.85;
+        if (bloom) {
+          // 섬광이 주변을 진영 색으로 물들이게 (흰 심을 넣으면 큰 전투가 하얗게 타 버린다)
+          const key = this.col[i] * FLASH_BUCKETS + Math.min(FLASH_BUCKETS - 1, Math.floor(t * FLASH_BUCKETS));
+          const fp = flashPaths[key] ?? (flashPaths[key] = new Path2D());
+          const h = r * 0.7;
+          fp.rect(x - h, y - h, h * 2, h * 2);
+          bloom.mark(x, y, r);
+        }
       } else {
         r = Math.max(this.size[i], 1.6 * px);
         ctx.globalAlpha = 1 - t;
       }
-      drawSprite(ctx, glowSprite(this.colors[this.col[i]]), x, y, r);
+      drawSprite(ctx, glowSprite(color), x, y, r);
+    }
+    if (bg) {
+      flashPaths.forEach((p, key) => {
+        if (!p) return;
+        // 단계 가운데 나이의 밝기 (1 − t)²
+        const t = ((key % FLASH_BUCKETS) + 0.5) / FLASH_BUCKETS;
+        bg.globalAlpha = 0.6 * (1 - t) * (1 - t);
+        bg.fillStyle = this.colors[Math.floor(key / FLASH_BUCKETS)];
+        bg.fill(p);
+      });
     }
 
     // 방어막 피격 호
@@ -397,12 +436,15 @@ export class Effects {
       if (!inView(view, a.x, a.y, a.r + 10)) continue;
       const t = a.age / a.life;
       const spread = a.spread * (0.7 + t * 0.6);
-      ctx.globalAlpha = (1 - t) * 0.45;
-      ctx.strokeStyle = a.color;
-      ctx.lineWidth = Math.max(6 * px, 4);
-      ctx.beginPath();
-      ctx.arc(a.x, a.y, a.r, a.angle - spread, a.angle + spread);
-      ctx.stroke();
+      if (bg && bloom) {
+        bg.globalAlpha = (1 - t) * 0.5;
+        bg.strokeStyle = a.color;
+        bg.lineWidth = 2 * bloom.unit;
+        bg.beginPath();
+        bg.arc(a.x, a.y, a.r, a.angle - spread, a.angle + spread);
+        bg.stroke();
+        bloom.mark(a.x + Math.cos(a.angle) * a.r, a.y + Math.sin(a.angle) * a.r, a.r * spread + 4);
+      }
       ctx.globalAlpha = 1 - t;
       ctx.strokeStyle = mixHex(a.color, '#ffffff', 0.6);
       ctx.lineWidth = Math.max(1.6 * px, 1);
@@ -416,25 +458,30 @@ export class Effects {
       if (!inView(view, r.x, r.y, Math.max(r.r0, r.r1) + 10)) continue;
       const t = r.age / r.life;
       const e = 1 - (1 - t) * (1 - t) * (1 - t);
-      const rad = r.r0 + (r.r1 - r.r0) * e;
-      if (r.glow) {
-        ctx.globalAlpha = (1 - t) * 0.3;
-        ctx.strokeStyle = r.color;
-        ctx.lineWidth = (r.width * 3.5 * (1 - t * 0.5)) * px;
-        ctx.beginPath();
-        ctx.arc(r.x, r.y, Math.max(0.1, rad), 0, Math.PI * 2);
-        ctx.stroke();
+      const rad = Math.max(0.1, r.r0 + (r.r1 - r.r0) * e);
+      if (r.glow && bg && bloom) {
+          bg.globalAlpha = (1 - t) * 0.5;
+          bg.strokeStyle = r.color;
+          bg.lineWidth = Math.max(1.5 * bloom.unit, r.width * px);
+          bg.beginPath();
+          bg.arc(r.x, r.y, rad, 0, Math.PI * 2);
+          bg.stroke();
+          bloom.mark(r.x, r.y, rad + 4);
       }
       ctx.globalAlpha = (1 - t) * (r.glow ? 1 : 0.6);
       ctx.strokeStyle = r.glow ? mixHex(r.color, '#ffffff', 0.35) : r.color;
       ctx.lineWidth = r.width * (1 - t * 0.6) * px;
       ctx.beginPath();
-      ctx.arc(r.x, r.y, Math.max(0.1, rad), 0, Math.PI * 2);
+      ctx.arc(r.x, r.y, rad, 0, Math.PI * 2);
       ctx.stroke();
     }
 
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
+    if (bg) {
+      bg.globalAlpha = 1;
+      bg.globalCompositeOperation = 'source-over';
+    }
   }
 
   /** 떠오르며 사라지는 월드 글자 (행성 이름표 위) */

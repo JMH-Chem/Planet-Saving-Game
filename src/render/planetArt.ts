@@ -4,6 +4,7 @@ import { makeCanvas, mixHex, mulberry32, parseHex, toHex, type Rgb } from './spr
 // 행성 표면을 행성마다 한 번만 절차적으로 구워 둔다 (행성 id 가 시드라 같은 맵의 같은 행성은 늘 같은 모습).
 // 표면 텍스처는 가로로 이어지게(지름의 2배 폭) 만들고, 원 안에서 패턴을 천천히 밀어 자전하는 것처럼 보이게 한다.
 // 조명(왼쪽 위 광원의 명암 경계, 가장자리 어둡게)은 돌지 않는 별도 캔버스로 덮는다.
+// 바다 행성의 구름은 표면과 다른 속도로 흐르도록 따로 굽고, 도시 불빛 자리는 표면 좌표로 정해 두어 표면과 함께 돈다.
 
 export type PlanetStyle = 'rocky' | 'gas' | 'ocean' | 'ice' | 'desert';
 
@@ -17,6 +18,17 @@ export interface PlanetArt {
   spin: number;
   /** 고정 조명 레이어 (지름 × 지름) */
   shade: HTMLCanvasElement;
+  /** 표면 위를 따로 흐르는 구름 (바다 행성만, 표면과 같은 크기의 흰 구름 + 투명) */
+  clouds: HTMLCanvasElement | null;
+  /** 구름이 흐르는 속도 (월드 단위/초, 표면보다 조금 빠르다) */
+  cloudSpin: number;
+  /**
+   * 도시 불빛 자리: [u, v, w] 묶음. u ∈ [0,1) 표면 가로(이어짐), v ∈ [0,1] 세로, w = 밝기(0~1).
+   * 밝은(큰 도시) 순으로 정렬되어 있어 앞에서부터 n 개를 켜면 된다 (피해 연출의 불길 자리도 앞쪽을 쓴다)
+   */
+  lights: Float32Array;
+  /** 가장자리 대기 산란 색 */
+  haze: string;
 }
 
 /** 월드 1 단위당 텍스처 픽셀. 최대 확대(×3.2)에서도 크게 뭉개지지 않는 선 */
@@ -133,6 +145,8 @@ export class PlanetBaker {
   private readonly ocean: (typeof OCEAN)[number];
   private readonly bandFreq: number;
   private readonly seaLevel: number;
+  /** 바다 행성의 구름 (흰색 + 투명도). 다른 스타일은 null */
+  private readonly cloudImg: ImageData | null;
 
   constructor(private readonly p: Planet) {
     const rnd = (this.rnd = mulberry32(mixSeed(p.id)));
@@ -142,6 +156,7 @@ export class PlanetBaker {
     this.nh = Math.ceil(this.D / 2);
     // 한 칸 더: 마지막 열 = 첫 열이라 늘릴 때 가로 이음매에서도 보간이 이어진다
     this.img = new ImageData(this.nw + 1, this.nh);
+    this.cloudImg = this.style === 'ocean' ? new ImageData(this.nw + 1, this.nh) : null;
     this.seed = (rnd() * 1e6) | 0;
     this.rock = pick(ROCKY, rnd);
     this.gas = pick(GAS, rnd);
@@ -157,6 +172,7 @@ export class PlanetBaker {
     if (this.art) return true;
     const { nw, nh } = this;
     const data = this.img.data;
+    const cloud = this.cloudImg?.data;
     const c: Rgb = { r: 0, g: 0, b: 0 };
     while (this.row < nh) {
       const y = this.row++;
@@ -167,9 +183,18 @@ export class PlanetBaker {
         data[i + 1] = c.g;
         data[i + 2] = c.b;
         data[i + 3] = 255;
+        if (cloud) {
+          // 구름: 예전처럼 표면에 섞지 않고 따로 (흰색 + 투명도)
+          const ca = Math.max(0, Math.min(0.85, (fbm(x / nw + 0.37, y / nw, 7, 5, this.seed + 11) - 0.56) * 3.4));
+          cloud[i] = 245;
+          cloud[i + 1] = 248;
+          cloud[i + 2] = 255;
+          cloud[i + 3] = ca * 255;
+        }
       }
       const first = y * (nw + 1) * 4, last = first + nw * 4;
       for (let k = 0; k < 4; k++) data[last + k] = data[first + k];
+      if (cloud) for (let k = 0; k < 4; k++) cloud[last + k] = cloud[first + k];
       if (performance.now() > deadline && this.row < nh) return false;
     }
     this.art = this.finish();
@@ -207,11 +232,7 @@ export class PlanetBaker {
           c.g += (243 - c.g) * cap;
           c.b += (250 - c.b) * cap;
         }
-        // 구름
-        const ca = Math.max(0, Math.min(0.85, (fbm(u + 0.37, v, 7, 5, seed + 11) - 0.56) * 3.4));
-        c.r += (245 - c.r) * ca;
-        c.g += (248 - c.g) * ca;
-        c.b += (255 - c.b) * ca;
+        // 구름은 step() 이 따로 굽는다 (표면과 다른 속도로 흐른다)
         return;
       }
       case 'ice': {
@@ -227,16 +248,72 @@ export class PlanetBaker {
     }
   }
 
-  private finish(): PlanetArt {
-    const { D, style, rnd } = this;
-    const W = D * 2, H = D;
+  /** 절반 해상도로 구운 ImageData 를 표면 크기로 부드럽게 늘린다 */
+  private upscale(img: ImageData): HTMLCanvasElement {
+    const W = this.D * 2, H = this.D;
     const half = makeCanvas(this.nw + 1, this.nh);
-    half.getContext('2d')!.putImageData(this.img, 0, 0);
-    const surface = makeCanvas(W, H);
-    const g = surface.getContext('2d')!;
+    half.getContext('2d')!.putImageData(img, 0, 0);
+    const out = makeCanvas(W, H);
+    const g = out.getContext('2d')!;
     g.imageSmoothingEnabled = true;
     g.imageSmoothingQuality = 'high';
     g.drawImage(half, 0, 0, W + W / this.nw, H);
+    return out;
+  }
+
+  /** 바다 행성: 그 자리가 육지인지 (sample() 의 높이와 같은 식) */
+  private isLand(u: number, v: number): boolean {
+    return fbm(u, v * (this.nh / this.nw), 5, 6, this.seed) > this.seaLevel + 0.015;
+  }
+
+  /**
+   * 도시 불빛 자리. 도시 몇 곳(무리)마다 불빛 여러 개를 흩뿌린다. 바다 행성은 육지 위주에 셋 중 하나쯤은 바다 위
+   * 해상 도시로 작게 (대륙이 한쪽에 몰린 행성은 대륙이 낮쪽에 있는 동안 밤쪽이 캄캄해 주인이 안 읽힌다),
+   * 가스 행성은 적도의 떠 있는 정거장 몇 개.
+   * 표면 모양과 상관없는 별도 난수열을 써서 예전부터 있던 표면(분화구 · 폭풍 위치)은 그대로 둔다
+   */
+  private bakeLights(): Float32Array {
+    const rnd = mulberry32(mixSeed(this.p.id) ^ 0x5bd1e995);
+    const style = this.style;
+    const sizeK = this.p.radius / 26;
+    // 보이는 면은 텍스처 한 주기의 절반, 그중 밤쪽은 1/3 쯤이라 도시를 넉넉히 둬야 밤쪽에 늘 몇 곳은 보인다
+    const clusters = Math.max(3, Math.round({ rocky: 12, desert: 10, ice: 8, ocean: 14, gas: 6 }[style] * sizeK));
+    const out: number[] = [];
+    const gauss = () => (rnd() + rnd() + rnd() - 1.5) / 1.5;
+    for (let k = 0; k < clusters; k++) {
+      let cu = rnd(), cv = style === 'gas' ? 0.44 + rnd() * 0.12 : 0.14 + rnd() * 0.72;
+      let land = true;
+      if (style === 'ocean' && rnd() < 0.35) land = false;
+      else if (style === 'ocean') {
+        let tries = 0;
+        while (!this.isLand(cu, cv) && tries++ < 14) {
+          cu = rnd();
+          cv = 0.14 + rnd() * 0.72;
+        }
+        land = tries <= 14;
+      }
+      const cw = (0.45 + rnd() * 0.55) * (land ? 1 : 0.7);
+      const n = style === 'gas' || !land ? 2 + Math.floor(rnd() * 2) : 4 + Math.floor(rnd() * 7);
+      for (let i = 0; i < n; i++) {
+        // 첫 불빛 = 도심 (가장 밝다), 나머지는 둘레에 흩어진 교외
+        const u = i === 0 ? cu : (((cu + gauss() * 0.03) % 1) + 1) % 1;
+        const v = i === 0 ? cv : Math.max(0.06, Math.min(0.94, cv + gauss() * 0.06));
+        if (style === 'ocean' && land && i > 0 && !this.isLand(u, v)) continue;
+        out.push(u, v, i === 0 ? cw : cw * (0.3 + 0.6 * rnd()));
+      }
+    }
+    // 밝은 순으로 정렬 (앞에서부터 켠다)
+    const idx = Array.from({ length: out.length / 3 }, (_, i) => i).sort((a, b) => out[b * 3 + 2] - out[a * 3 + 2]);
+    const sorted = new Float32Array(out.length);
+    idx.forEach((j, i) => sorted.set(out.slice(j * 3, j * 3 + 3), i * 3));
+    return sorted;
+  }
+
+  private finish(): PlanetArt {
+    const { D, style, rnd } = this;
+    const W = D * 2, H = D;
+    const surface = this.upscale(this.img);
+    const g = surface.getContext('2d')!;
 
     // 벡터로 얹는 디테일 (가로 이음매를 넘는 것은 반대쪽에 한 번 더 그린다)
     const wrapDraw = (x: number, r: number, fn: (x: number) => void) => {
@@ -290,15 +367,57 @@ export class PlanetBaker {
         g.restore();
       });
     }
+    const spin = (style === 'gas' ? 3.2 : 1.8) * (0.7 + rnd() * 0.6) * (rnd() < 0.5 ? 1 : -1);
     return {
       style,
       surface,
       scale: D / (this.p.radius * 2),
-      spin: (style === 'gas' ? 3.2 : 1.8) * (0.7 + rnd() * 0.6) * (rnd() < 0.5 ? 1 : -1),
+      spin,
       shade: bakeShade(D, style),
+      clouds: this.cloudImg ? this.upscale(this.cloudImg) : null,
+      // 구름은 같은 쪽으로 조금 더 빨리 흘러 표면 위에 떠 있는 것처럼 보인다
+      cloudSpin: spin * 1.45,
+      lights: this.bakeLights(),
+      haze: HAZE[style],
     };
   }
 }
+
+/** 명암 경계 광원 (bakeShade 와 같은 자리 · 반경, 행성 반경 R 대비) */
+const LIGHT_X = -0.48;
+const LIGHT_Y = -0.52;
+const LIGHT_R = 2.05;
+
+/** 행성 중심 기준 (x, y) 가 밤인 정도 0(낮)~1(밤): bakeShade 의 어둠이 짙어지는 구간과 맞춘다 */
+export function nightFactor(x: number, y: number, R: number): number {
+  const d = Math.hypot(x - LIGHT_X * R, y - LIGHT_Y * R) / (LIGHT_R * R);
+  const t = Math.max(0, Math.min(1, (d - 0.36) / (0.62 - 0.36)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * i 번째 도시 불빛이 지금(자전 scroll) 행성 중심 기준 어디에 보이는지. 원판 뒤로 넘어갔으면 false.
+ * 표면 패턴과 같은 변환: 가로 x = u × 4R − R − scroll 를 4R 주기로 [−R, 3R) 에 접는다 (planets.ts 의 패턴 행렬)
+ */
+export function lightAt(lights: Float32Array, i: number, R: number, scroll: number, out: { x: number; y: number }): boolean {
+  const period = 4 * R;
+  let x = lights[i * 3] * period - R - scroll;
+  x = ((((x + R) % period) + period) % period) - R;
+  const y = lights[i * 3 + 1] * 2 * R - R;
+  if (x * x + y * y > R * R * 0.9) return false;
+  out.x = x;
+  out.y = y;
+  return true;
+}
+
+/** 스타일별 대기 산란 색 (bakeShade 의 안쪽 산란과 같은 색) */
+const HAZE: Record<PlanetStyle, string> = {
+  gas: '#ffecd2',
+  ice: '#d2f0ff',
+  desert: '#ffdcb4',
+  ocean: '#96c8ff',
+  rocky: '#96c8ff',
+};
 
 function drawCrater(g: CanvasRenderingContext2D, x: number, y: number, r: number): void {
   // 광원이 왼쪽 위: 분화구 안쪽의 왼쪽 위 벽은 그늘, 오른쪽 아래 벽은 빛을 받는다
@@ -327,7 +446,8 @@ function bakeShade(D: number, style: PlanetStyle): HTMLCanvasElement {
   g.clip();
 
   // 대기 산란 (가장자리의 옅은 빛) — 뒤에 덮는 어둠이 밤 쪽은 가려 준다
-  const hazeColor = style === 'gas' ? '255,236,210' : style === 'ice' ? '210,240,255' : style === 'desert' ? '255,220,180' : '150,200,255';
+  const h = parseHex(HAZE[style]);
+  const hazeColor = `${h.r},${h.g},${h.b}`;
   const haze = g.createRadialGradient(R, R, R * 0.78, R, R, R);
   haze.addColorStop(0, `rgba(${hazeColor},0)`);
   haze.addColorStop(1, `rgba(${hazeColor},0.38)`);
@@ -335,8 +455,8 @@ function bakeShade(D: number, style: PlanetStyle): HTMLCanvasElement {
   g.fillRect(0, 0, D, D);
 
   // 명암 경계
-  const lx = R - R * 0.48, ly = R - R * 0.52;
-  const term = g.createRadialGradient(lx, ly, 0, lx, ly, R * 2.05);
+  const lx = R + R * LIGHT_X, ly = R + R * LIGHT_Y;
+  const term = g.createRadialGradient(lx, ly, 0, lx, ly, R * LIGHT_R);
   term.addColorStop(0, 'rgba(0,0,8,0)');
   term.addColorStop(0.38, 'rgba(0,0,8,0.02)');
   term.addColorStop(0.62, 'rgba(0,0,8,0.5)');
