@@ -1,0 +1,476 @@
+/* 원본 style.css 는 보존한다. 이 파일의 스킨 규칙은 Codex 버전에만 적용된다. */
+.design-switch {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(160, 190, 200, 0.15);
+  font-size: 11px;
+}
+
+.design-switch a {
+  padding: 8px 10px;
+  color: #a2b0bf;
+  text-decoration: none;
+  border-radius: 6px;
+}
+
+.design-switch a:hover,
+.design-switch a[aria-current] {
+  color: #edf1e5;
+  background: rgba(190, 210, 210, 0.1);
+}
+
+.design-switch a:focus-visible {
+  outline: 2px solid #d5e8a4;
+  outline-offset: 2px;
+}
+
+html[data-design='codex'] {
+  --bg: #091218;
+  --panel: rgba(14, 27, 35, 0.96);
+  --panel-border: rgba(173, 203, 200, 0.2);
+  --text: #eef0e5;
+  --muted: #a0b1b5;
+  --accent: #d5e8a4;
+  --btn: rgba(154, 185, 186, 0.05);
+  --btn-hover: rgba(154, 185, 186, 0.13);
+  font-family: 'Avenir Next', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+}
+
+html[data-design='codex'] button {
+  border-radius: 7px;
+  transition: background-color 140ms, border-color 140ms;
+}
+
+html[data-design='codex'] :is(button, input, a):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+html[data-design='codex'] .overlay {
+  background: rgba(5, 14, 20, 0.8);
+}
+
+html[data-design='codex'] #menu {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 32px;
+  padding: max(28px, var(--safe-top)) max(32px, var(--safe-right)) max(28px, var(--safe-bottom)) max(32px, var(--safe-left));
+  background: radial-gradient(ellipse at 15% 20%, rgba(39, 73, 72, 0.42), transparent 65%), rgba(6, 15, 21, 0.94);
+}
+
+html[data-design='codex'] .cx-header {
+  width: min(1100px, 100%);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+html[data-design='codex'] .cx-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #bbc9c7;
+  font: 600 11px ui-monospace, monospace;
+  letter-spacing: 0.15em;
+}
+
+html[data-design='codex'] .cx-wordmark i {
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  position: relative;
+}
+
+html[data-design='codex'] .cx-wordmark i::after {
+  content: '';
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  top: 1px;
+  left: 11px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+html[data-design='codex'] .design-switch {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 3px;
+}
+
+html[data-design='codex'] .design-switch a[aria-current] {
+  background: #d5e8a4;
+  color: #182524;
+}
+
+html[data-design='codex'] .cx-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  width: min(1100px, 100%);
+  margin: auto;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: rgba(10, 23, 30, 0.78);
+  box-shadow: 0 30px 100px rgba(0, 0, 0, 0.22);
+}
+
+html[data-design='codex'] .cx-brief {
+  min-width: 0;
+  padding: 38px 40px 26px;
+  display: flex;
+  flex-direction: column;
+}
+
+html[data-design='codex'] .cx-eyebrow {
+  margin: 0 0 14px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+}
+
+html[data-design='codex'] .cx-title h1 {
+  margin: 0;
+  font-size: clamp(36px, 4.7vw, 62px);
+  font-weight: 750;
+  line-height: 1.25;
+  letter-spacing: -0.065em;
+}
+
+html[data-design='codex'] .cx-manifest {
+  margin: 18px 0 0;
+  color: #bac9c8;
+  font-size: 14px;
+  line-height: 1.85;
+  word-break: keep-all;
+}
+
+html[data-design='codex'] .cx-tactics {
+  margin: auto -12px 20px;
+  padding-top: 14px;
+}
+
+html[data-design='codex'] .cx-tactics svg {
+  display: block;
+  width: 100%;
+  max-height: 285px;
+}
+
+html[data-design='codex'] .cx-tactics figcaption {
+  display: flex;
+  justify-content: center;
+  gap: 30px;
+  color: #a0b1b5;
+  font-size: 11px;
+}
+
+html[data-design='codex'] .cx-tactics b {
+  margin-left: 6px;
+  color: #d5e8a4;
+  font-weight: 600;
+}
+
+html[data-design='codex'] .cx-tactics span + span b {
+  color: #8dccde;
+}
+
+html[data-design='codex'] .cx-principles {
+  margin: 0;
+  padding: 20px 0 0;
+  border-top: 1px solid var(--panel-border);
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #bbc9c7;
+  font-size: 11px;
+}
+
+html[data-design='codex'] .cx-principles span {
+  display: block;
+  margin-bottom: 8px;
+  color: #738e94;
+  font: 11px ui-monospace, monospace;
+}
+
+html[data-design='codex'] #menu .cx-settings {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 16px;
+  margin: 0;
+  width: auto;
+  padding: 30px 32px;
+  background: #101e27;
+  border: 0;
+  border-left: 1px solid var(--panel-border);
+  border-radius: 0 18px 18px 0;
+  backdrop-filter: none;
+}
+
+html[data-design='codex'] .cx-card-heading {
+  margin-bottom: 2px;
+}
+
+html[data-design='codex'] .cx-card-heading .cx-eyebrow {
+  color: #93a8ac;
+  font: 10px ui-monospace, monospace;
+  letter-spacing: 0.16em;
+  margin-bottom: 8px;
+}
+
+html[data-design='codex'] .cx-card-heading h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  letter-spacing: -0.035em;
+}
+
+html[data-design='codex'] .cx-settings .field {
+  gap: 9px;
+}
+
+html[data-design='codex'] .cx-settings .field > label {
+  color: #c3cece;
+  font-size: 12px;
+}
+
+html[data-design='codex'] .seg button {
+  min-height: 44px;
+  border-color: rgba(173, 203, 200, 0.18);
+  color: #b5c5c8;
+  font-size: 13px;
+}
+
+html[data-design='codex'] .seg button.on {
+  background: rgba(213, 232, 164, 0.1);
+  border-color: #b6ca8c;
+  color: #e9efcf;
+}
+
+html[data-design='codex'] .seg[data-name='mode'] button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 7px;
+  height: 70px;
+  padding: 12px;
+  font-weight: 650;
+}
+
+html[data-design='codex'] .seg small {
+  font-size: 10px;
+  color: #a3b4b1;
+  font-weight: 400;
+}
+
+html[data-design='codex'] .mode-desc {
+  min-height: 34px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+html[data-design='codex'] .seed input {
+  height: 44px;
+  background: #0a161e;
+  border-radius: 7px;
+  border-color: var(--panel-border);
+  color: #e2e9d4;
+}
+
+html[data-design='codex'] .seed button {
+  border: 1px solid var(--panel-border);
+}
+
+html[data-design='codex'] .primary {
+  min-height: 50px;
+  background: #d5e8a4;
+  color: #1b2d29;
+  font-size: 14px;
+  font-weight: 750;
+  border: 1px solid #d5e8a4;
+}
+
+html[data-design='codex'] .primary:hover {
+  background: #e7f3c3;
+}
+
+html[data-design='codex'] .ghost {
+  min-height: 44px;
+  color: #b8c7c8;
+  border-color: var(--panel-border);
+  font-size: 12px;
+}
+
+html[data-design='codex'] .cx-settings .ghost {
+  height: 44px;
+  min-height: 44px;
+  border: 0;
+  margin-top: -7px;
+}
+
+html[data-design='codex'] .cx-launch-note {
+  margin: -8px 0 0;
+  text-align: center;
+  color: #8da4a7;
+  font-size: 10px;
+}
+
+/* 전장: 진영 색은 원본과 공유하고 프레임·숫자·선택 상태의 위계만 정리한다. */
+html[data-design='codex'] .top-bar {
+  background: linear-gradient(#0c1b24f5 70%, #0c1b2400);
+  padding-top: calc(12px + var(--safe-top));
+  padding-bottom: 12px;
+}
+
+html[data-design='codex'] .chip {
+  border-radius: 7px;
+  padding: 6px 10px;
+  gap: 8px;
+  font-size: 11px;
+  background: #10232b;
+}
+
+html[data-design='codex'] .chip b {
+  font: 600 19px ui-monospace, monospace;
+}
+
+html[data-design='codex'] .chip small {
+  font-size: 10px;
+}
+
+html[data-design='codex'] .icon-btn {
+  min-width: 44px;
+  height: 44px;
+  border-radius: 7px;
+}
+
+html[data-design='codex'] .timer {
+  color: #d6dfcf;
+  font-weight: 500;
+}
+
+html[data-design='codex'] .power-bar {
+  height: 3px;
+  margin-top: 10px;
+}
+
+html[data-design='codex'] .command-bar {
+  border-radius: 10px;
+  padding: 8px;
+  gap: 4px;
+  background: #0d1e28f5;
+  box-shadow: 0 8px 30px #0004;
+}
+
+html[data-design='codex'] .command-bar button {
+  min-height: 48px;
+  font-size: 12px;
+  border: 1px solid transparent;
+}
+
+html[data-design='codex'] .command-bar .formation {
+  background: #cadd9a18;
+  border-color: #cadd9a66;
+  color: #e1ecc4;
+}
+
+html[data-design='codex'] .command-bar .danger {
+  color: #f2b7ad;
+  background: #ed998111;
+}
+
+html[data-design='codex'] .sel-count {
+  padding: 0 12px 0 4px;
+  border-right: 1px solid var(--panel-border);
+}
+
+html[data-design='codex'] .sel-count b {
+  color: #d5e8a4;
+}
+
+html[data-design='codex'] .minimap canvas,
+html[data-design='codex'] .toast,
+html[data-design='codex'] .wave span {
+  border-radius: 6px;
+}
+
+html[data-design='codex'] #result .panel,
+html[data-design='codex'] #confirm .panel,
+html[data-design='codex'] #help .panel {
+  border-radius: 12px;
+  background: #10212bf5;
+}
+
+html[data-design='codex'] :is(#result, #confirm) h1 {
+  background: none;
+  color: #e6edcf;
+}
+
+@media (max-width: 760px) {
+  html[data-design='codex'] #menu {
+    padding: max(16px, var(--safe-top)) max(16px, var(--safe-right)) max(16px, var(--safe-bottom)) max(16px, var(--safe-left));
+    gap: 20px;
+  }
+  html[data-design='codex'] .cx-header { gap: 8px; }
+  html[data-design='codex'] .cx-wordmark { font-size: 9px; letter-spacing: 0.05em; gap: 7px; }
+  html[data-design='codex'] .design-switch { font-size: 10px; }
+  html[data-design='codex'] .design-switch a { padding: 8px; }
+  html[data-design='codex'] .cx-stage { grid-template-columns: minmax(0, 1fr); max-width: 480px; border-radius: 12px; }
+  html[data-design='codex'] .cx-brief { padding: 24px; }
+  html[data-design='codex'] .cx-eyebrow { margin-bottom: 9px; }
+  html[data-design='codex'] .cx-title h1 { font-size: 38px; }
+  html[data-design='codex'] .cx-manifest { margin-top: 10px; font-size: 12px; }
+  html[data-design='codex'] .cx-tactics,
+  html[data-design='codex'] .cx-principles { display: none; }
+  html[data-design='codex'] #menu .cx-settings { padding: 24px; gap: 14px; border-left: 0; border-top: 1px solid var(--panel-border); border-radius: 0 0 12px 12px; }
+  html[data-design='codex'] .cx-card-heading { display: none; }
+  html[data-design='codex'] .chip { padding: 5px 7px; gap: 5px; }
+  html[data-design='codex'] .chip b { font-size: 15px; }
+  html[data-design='codex'] .top-actions { gap: 4px; }
+  html[data-design='codex'] .command-bar { padding: 5px; }
+  html[data-design='codex'] .command-bar button { font-size: 11px; padding: 0 5px; }
+  html[data-design='codex'] .sel-count { padding-right: 6px; }
+}
+
+@media (max-width: 360px) {
+  html[data-design='codex'] .cx-wordmark { font-size: 0; }
+  html[data-design='codex'] .cx-brief { padding: 20px; }
+  html[data-design='codex'] #menu .cx-settings { padding: 20px; }
+  html[data-design='codex'] .command-bar { gap: 1px; }
+  html[data-design='codex'] .command-bar button { padding: 0 2px; font-size: 10px; }
+}
+
+@media (max-height: 520px) and (orientation: landscape) {
+  html[data-design='codex'] #menu { padding: 12px 20px; gap: 12px; }
+  html[data-design='codex'] .cx-stage { grid-template-columns: minmax(170px, 0.8fr) minmax(300px, 1fr); max-width: 1000px; }
+  html[data-design='codex'] .cx-brief { padding: 22px; border: 0; }
+  html[data-design='codex'] .cx-title h1 { font-size: 32px; }
+  html[data-design='codex'] .cx-manifest { font-size: 11px; }
+  html[data-design='codex'] .cx-tactics,
+  html[data-design='codex'] .cx-principles,
+  html[data-design='codex'] .cx-card-heading,
+  html[data-design='codex'] .cx-launch-note { display: none; }
+  html[data-design='codex'] #menu .cx-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; padding: 18px; border-top: 0; border-left: 1px solid var(--panel-border); border-radius: 0 12px 12px 0; }
+  html[data-design='codex'] .cx-settings .field { gap: 5px; grid-column: auto; grid-row: auto; }
+  html[data-design='codex'] .cx-settings .seg[data-name='mode'] button { height: 44px; padding: 8px; }
+  html[data-design='codex'] .cx-settings .seg small { display: none; }
+  html[data-design='codex'] .cx-settings .mode-desc { display: none; }
+  html[data-design='codex'] .cx-settings :is(.primary, .ghost) { height: 44px; min-height: 44px; margin: 0; grid-column: auto; grid-row: auto; }
+  html[data-design='codex'] .command-bar button { min-height: 0; }
+  html[data-design='codex'] .top-bar { padding-top: calc(4px + var(--safe-top)); }
+  html[data-design='codex'] .icon-btn { min-width: 36px; height: 36px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-design='codex'] button { transition: none; }
+  html[data-design='codex'] .wave.alert span { animation: none; }
+}

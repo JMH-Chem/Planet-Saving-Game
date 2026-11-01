@@ -198,7 +198,8 @@ export class World {
     this.refreshCounts();
     this.grid.rebuild(this.units);
     this.combat(dt);
-    this.removeDead();
+    // 점령과 생산 정원은 이번 전투에서 살아남은 병력으로 판단한다.
+    if (this.removeDead()) this.refreshCounts();
     this.resolveCaptures();
     this.updatePlanets(dt);
     this.refreshCounts();
@@ -337,7 +338,7 @@ export class World {
     }
   }
 
-  private removeDead(): void {
+  private removeDead(): boolean {
     let w = 0;
     for (const u of this.units) {
       if (u.hp > 0) {
@@ -349,7 +350,9 @@ export class World {
         this.events.push({ type: 'death', x: u.x, y: u.y, faction: u.faction });
       }
     }
+    const changed = this.units.length !== w;
     this.units.length = w;
+    return changed;
   }
 
   // ───────────────────────────── 행성 ─────────────────────────────
@@ -358,7 +361,8 @@ export class World {
     for (const p of this.planets) {
       if (p.defense > 0) continue;
       // 대기권 안 병력이 가장 많은 (소유자가 아닌) 진영이 차지한다.
-      let to = p.lastAssaultBy;
+      // 마지막 사격 진영이 전멸했다면 점령권을 주지 않는다.
+      let to = p.owner;
       let best = 0;
       p.presence.forEach((count, f) => {
         if (f !== p.owner && count > best) {

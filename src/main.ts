@@ -1,6 +1,7 @@
 import './style.css';
 import { sfx } from './audio/sfx';
 import { DEFENSE, type Difficulty } from './config';
+import { initializeDesign } from './design';
 import { Game } from './game';
 import { InputController } from './input/controller';
 import { Minimap } from './render/minimap';
@@ -8,6 +9,10 @@ import type { MatchSettings } from './sim/match';
 import { PLAYER, type GameEvent, type GameMode } from './sim/types';
 import { Alerts } from './ui/alerts';
 import { Hud } from './ui/hud';
+import { readLaunchSettings } from './ui/launch';
+
+initializeDesign();
+const params = new URLSearchParams(location.search);
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -34,7 +39,7 @@ let alerts: Alerts | null = null;
 let hudTimer = 0;
 /** 결과 화면을 띄울 타이머. 그 전에 판을 떠나면(메뉴 · 다시 하기) 취소해야 옛 결과가 새 화면 위에 뜨지 않는다 */
 let resultTimer = 0;
-let settings: MatchSettings = { aiCount: 1, difficulty: 'normal', seed: randomSeed(), mode: 'conquest' };
+let settings: MatchSettings = readLaunchSettings(params, randomSeed);
 
 function randomSeed(): number {
   return Math.floor(Math.random() * 1_000_000);
@@ -72,6 +77,8 @@ function showMenu(): void {
   menu.hidden = false;
   seedInput.value = String(settings.seed);
   setSeg('mode', settings.mode ?? 'conquest');
+  setSeg('aiCount', String(settings.aiCount));
+  setSeg('difficulty', settings.difficulty);
   syncModeField();
   game = new Game(canvas, { aiCount: 3, difficulty: 'normal', seed: randomSeed(), autoplay: true, portrait: isPortrait() });
   game.speed = 1.5;
@@ -126,7 +133,7 @@ function startMatch(s: MatchSettings): void {
   if (waves) hud.toast(`첫 침공까지 ${clock(waves.schedule[0].spawnAt)} · 주변 행성을 먼저 확보하세요`, g.world.factions[waves.faction].color, 7000);
 }
 
-function showResult(winner: number): void {
+function showResult(winner: number | null): void {
   if (!game) return;
   const w = game.world;
   const me = w.factions[PLAYER];
@@ -342,7 +349,7 @@ $('btn-start').addEventListener('click', () => {
   startMatch({
     aiCount: Number(segValue('aiCount')),
     difficulty: segValue('difficulty') as Difficulty,
-    seed: Number(seedInput.value) || randomSeed(),
+    seed: seedInput.value.trim() !== '' && Number.isFinite(Number(seedInput.value)) ? Math.trunc(Number(seedInput.value)) : randomSeed(),
     portrait: isPortrait(),
     mode: segValue('mode') as GameMode,
   });
@@ -464,14 +471,10 @@ function selectSound(n: number): void {
 }
 
 // ?play 로 바로 시작 (개발/테스트용): ?play&ai=2&difficulty=hard&seed=42, 방어전은 &mode=defense
-const params = new URLSearchParams(location.search);
 if (params.has('play')) {
   startMatch({
-    aiCount: Number(params.get('ai')) || 1,
-    difficulty: (params.get('difficulty') as Difficulty) || 'normal',
-    seed: Number(params.get('seed')) || randomSeed(),
+    ...settings,
     portrait: isPortrait(),
-    mode: params.get('mode') === 'defense' ? 'defense' : 'conquest',
   });
 } else {
   showMenu();
