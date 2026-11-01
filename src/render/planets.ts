@@ -1,36 +1,49 @@
 import { NEUTRAL, type Planet } from '../sim/types';
 import type { World } from '../sim/world';
-import { inView, type ViewRect } from './effects';
-import { PlanetBaker, type PlanetArt } from './planetArt';
-import { drawSprite, makeCanvas, mixHex, softSprite, withAlpha } from './sprites';
+import type { Bloom } from './bloom';
+import { inView, type Effects, type ViewRect } from './effects';
+import { lightAt, nightFactor, PlanetBaker, type PlanetArt } from './planetArt';
+import { drawSprite, glowSprite, makeCanvas, mixHex, softSprite, withAlpha } from './sprites';
 
 // 행성: 대기권(게임 규칙상 '안 = 강하, 밖 = 교전' 경계라 늘 또렷하게) · 표면 · 방어도 고리 · 생산 진행 · 이름표.
-// 소유 진영은 표면 색이 아니라 바깥 고리 · 대기 광륜 · 가장자리 빛으로 알린다 (표면은 자연스러운 행성 그대로).
+// 소유 진영은 표면 색이 아니라 바깥 고리 · 대기 광륜 · 가장자리 빛 · 밤쪽 도시 불빛으로 알린다 (표면은 자연스러운 행성 그대로).
 //
-// 대기 · 광륜 · 표면 · 조명 · 방어도 고리는 행성마다 화면 해상도 그대로의 캔버스 한 장에 합쳐 두고
-// (자전으로 0.6px 이상 밀렸거나, 확대 배율 · 소유자 · 방어도가 바뀔 때만 다시 그림) 매 프레임 한 번만 찍는다.
+// 대기 · 광륜 · 표면 · 구름 · 조명 · 도시 불빛 · 방어도 고리는 행성마다 화면 해상도 그대로의 캔버스 한 장에 합쳐 두고
+// (자전 · 구름이 0.6px 이상 밀렸거나, 확대 배율 · 보이는 색 · 방어도 · 불빛 수가 바뀔 때만 다시 그림) 매 프레임 한 번만 찍는다.
 // 축소 · 패턴 · 점선이 섞인 그리기는 GPU 가 없거나 약한 기기에서 특히 비싸기 때문이다.
 
 const NEUTRAL_RING = '#b8c4d6';
 const LOW_DEFENSE = '#ff5a5a';
 const FULL = '#ffd166';
+/** 도시 불빛은 진영 색을 따뜻한 전등 색 쪽으로 조금 섞는다 (진영 색 그대로면 네온 간판처럼 보인다) */
+const CITY_LIGHT = '#ffd9a0';
+/** 방어도가 바닥난 행성의 불길 */
+const FIRE = '#ff7a2e';
 /** 방어도 고리 칸 수 */
 const SEGMENTS = 24;
 /** 한 프레임에 행성 텍스처를 굽는 시간 예산(ms). 시작할 때 한꺼번에 굽느라 멈추지 않게 나눈다 */
 const BAKE_BUDGET_MS = 5;
 /** 이보다 크게 확대(화면 px / 월드 단위)되면 캐시 캔버스가 너무 커지므로 직접 그린다 (그때는 보이는 행성도 몇 개뿐) */
 const MAX_CACHE_SCALE = 5;
-/** 자전으로 이만큼(화면 px) 밀리면 캐시를 다시 그린다 */
-const SPIN_STEP_PX = 0.6;
+/** 점령 후 새 주인의 색이 행성을 덮어 가는 시간(초) */
+const FLOOD_TIME = 0.8;
+/** 마지막 강하 피해 뒤 '포위당하는 중' 표시가 남는 시간(초) */
+const SIEGE_TIME = 1.2;
+/** 방어도가 이 비율 아래면 위험 (고리 깜빡임 · 불길 · 연기) */
+const LOW = 0.3;
 
 interface PlanetCache {
   canvas: HTMLCanvasElement;
   g: CanvasRenderingContext2D;
   pattern: CanvasPattern | null;
+  cloudPattern: CanvasPattern | null;
   scale: number;
   scroll: number;
-  owner: number;
+  /** 그려 둔 소유 색 (점령 직후에는 이전 주인의 색) */
+  color: string;
   ring: number;
+  /** 도시 불빛 수 · 부가 연출 · 위험 상태를 묶은 값 */
+  detail: number;
   used: number;
 }
 
@@ -43,21 +56,57 @@ interface PlanetState {
   /** 최근 피해 자국: 잠시 머물렀다가 shown 으로 줄어든다 (격투 게임 체력바처럼) */
   trail: number;
   trailHold: number;
+  /** 방어도 고리가 움직이는 중 (피해 · 회복): 그동안은 캐시에 넣지 않고 매 프레임 그린다 */
+  ringLive: boolean;
   /** 피격 번쩍임 0~1 */
   hit: number;
   hitColor: string;
-  /** 점령 연출 */
-  sweep: number;
-  sweepColor: string;
+  /** 점령 연출: 0 → 1 동안 새 주인 색이 entry 쪽에서 번져 나간다. 그동안 캐시는 prevColor 로 그린다 */
+  flood: number;
+  prevColor: string;
+  /** 공격군이 들어온 방향 (행성 중심 기준 각도) */
+  entry: number;
   /** 생산 섬광 0~1 */
   birth: number;
 }
 
+/** 표면 그리기 한 번에 필요한 값들 */
+interface PaintParams {
+  color: string;
+  scroll: number;
+  cloudScroll: number;
+  /** 켤 도시 불빛 수 */
+  lit: number;
+  /** 대기 산란 */
+  extras: boolean;
+  px: number;
+  ring: boolean;
+}
+
+/** 품질 · 효과 연결 */
+export interface PlanetDrawOptions {
+  /** 도시 불빛 · 따로 흐르는 구름 · 대기 산란 · 피해 연기 (품질 낮음에서는 끈다) */
+  extras: boolean;
+  /** 자전으로 이만큼(화면 px) 밀리면 캐시를 다시 그린다 (품질 낮음은 덜 자주) */
+  spinStep: number;
+  reduced: boolean;
+  fx: Effects;
+  bloom: Bloom | null;
+  dt: number;
+}
+
+interface Patterns {
+  surface: CanvasPattern | null;
+  clouds: CanvasPattern | null;
+}
+
+const spot = { x: 0, y: 0 };
+
 export class PlanetLayer {
   private states: PlanetState[] = [];
   private matrix = new DOMMatrix();
-  /** 직접 그리기(크게 확대했을 때)용 패턴. 패턴은 만든 컨텍스트에서 쓴다 */
-  private patterns = new Map<number, CanvasPattern | null>();
+  /** 직접 그리기(크게 확대했을 때 · 점령 연출)용 패턴. 패턴은 만든 컨텍스트에서 쓴다 */
+  private patterns = new Map<number, Patterns>();
   private frames = 0;
   /** 직전 프레임의 배율. 확대/축소 중에는 캐시를 늘려서 쓰고, 멈추면 그 배율로 다시 그린다 */
   private prevScale = 0;
@@ -67,7 +116,7 @@ export class PlanetLayer {
     if (!s) {
       const f = Math.max(0, p.defense / p.maxDefense);
       s = this.states[p.id] = {
-        art: null, baker: null, cache: null, shown: f, trail: f, trailHold: 0, hit: 0, hitColor: '#ffffff', sweep: 1, sweepColor: '#ffffff', birth: 0,
+        art: null, baker: null, cache: null, shown: f, trail: f, trailHold: 0, ringLive: false, hit: 0, hitColor: '#ffffff', flood: 1, prevColor: NEUTRAL_RING, entry: 0, birth: 0,
       };
     }
     return s;
@@ -79,10 +128,13 @@ export class PlanetLayer {
     s.hitColor = color;
   }
 
-  captured(p: Planet, color: string): void {
+  /** 점령: fromColor = 이전 주인 색(중립이면 null), entry = 공격군이 들어온 방향 */
+  captured(p: Planet, fromColor: string | null, entry: number): void {
     const s = this.state(p);
-    s.sweep = 0;
-    s.sweepColor = color;
+    // 연출 도중 다시 넘어가면 지금 보이던 색에서 이어 간다
+    s.prevColor = s.flood < 1 ? s.prevColor : (fromColor ?? NEUTRAL_RING);
+    s.flood = 0;
+    s.entry = entry;
     s.shown = s.trail = Math.max(0, p.defense / p.maxDefense);
   }
 
@@ -105,15 +157,17 @@ export class PlanetLayer {
       // 거의 다 따라왔으면 딱 맞춰서 고리 캐시가 계속 다시 그려지지 않게 한다
       if (Math.abs(f - s.shown) < 0.001) s.shown = f;
       if (Math.abs(s.trail - s.shown) < 0.001) s.trail = s.shown;
+      s.ringLive = s.shown !== f || s.trail !== s.shown;
       s.hit = Math.max(0, s.hit - dt * 3.5);
       s.birth = Math.max(0, s.birth - dt * 4);
-      if (s.sweep < 1) s.sweep = Math.min(1, s.sweep + dt / 0.75);
+      if (s.flood < 1) s.flood = Math.min(1, s.flood + dt / FLOOD_TIME);
     }
   }
 
   // ───────────────────────────── 행성 (병력 아래) ─────────────────────────────
 
-  draw(ctx: CanvasRenderingContext2D, world: World, zoom: number, view: ViewRect, hover: number, clock: number, reduced: boolean): void {
+  draw(ctx: CanvasRenderingContext2D, world: World, zoom: number, view: ViewRect, hover: number, clock: number, opts: PlanetDrawOptions): void {
+    const { reduced, extras } = opts;
     const px = 1 / zoom;
     const m = ctx.getTransform();
     const scale = m.a;
@@ -125,32 +179,43 @@ export class PlanetLayer {
       if (!inView(view, p.x, p.y, p.atmosphereRadius + 40)) continue;
       const s = this.state(p);
       const color = this.ownerColor(world, p);
+      // 점령 연출 중에는 이전 주인의 모습을 깔고 그 위로 새 색이 번진다 (drawFlood)
+      const shownColor = s.flood < 1 ? s.prevColor : color;
       if (!s.art) this.bake(p, s, bakeDeadline);
       const art = s.art;
-      const low = s.shown < 0.3;
+      const low = s.shown < LOW;
       const period = art ? art.surface.width / art.scale : 1;
-      const scroll = art && !reduced ? (((clock * art.spin) % period) + period) % period : 0;
+      const scroll = art && !reduced ? mod(clock * art.spin, period) : 0;
+      // 구름: 품질이 낮으면 표면에 붙여 같이 돈다. 따로 흐를 때도 다시 그리는 시점은 표면 자전이 정한다
+      // (구름 때문에 따로 다시 그리면 캐시 다시 그리기가 40% 늘고, 한 번마다 캔버스 복사가 따라붙어 비싸다)
+      const cloudScroll = art?.clouds && extras && !reduced ? mod(clock * art.cloudSpin, period) : scroll;
+      const lit = (color: string) => (extras && art && color !== NEUTRAL_RING ? this.litCount(p, art, low) : 0);
+      // 고리가 움직이는 동안(공격받는 중 · 회복 중 · 위험)은 매 프레임 직접 그린다. 캐시에 넣으면 고리가 바뀔 때마다
+      // 행성 전체를 다시 그리고 복사하게 되는데, 전투 중인 행성은 그게 매 프레임이다
+      const liveRing = low || s.ringLive;
+      const params: PaintParams = { color: shownColor, scroll, cloudScroll, lit: lit(shownColor), extras, px, ring: !liveRing };
 
       if (art && scale <= MAX_CACHE_SCALE) {
         const c = this.cache(p, s, scale);
-        // 위험(깜빡임) 상태의 고리는 매 프레임 바뀌므로 캐시에 넣지 않는다
-        const ringKey = low ? -1 : Math.round(s.shown * 480) * 1000 + Math.round(s.trail * 480);
-        let spun = Math.abs(scroll - c.scroll);
-        spun = Math.min(spun, period - spun);
+        const ringKey = liveRing ? -1 : Math.round(s.shown * 480) * 1000 + Math.round(s.trail * 480);
+        const detail = params.lit * 4 + (extras ? 2 : 0) + (low ? 1 : 0);
+        const spun = wrapDist(scroll, c.scroll, period);
         const ratio = scale / c.scale;
         // 확대/축소가 진행 중이면 (배율 차이가 크지 않은 한) 기존 캐시를 늘려 쓰고, 멈춘 뒤에 다시 그린다
         const rescale = c.scale !== scale && (!zooming || ratio < 0.8 || ratio > 1.25);
-        if (rescale || c.owner !== p.owner || c.ring !== ringKey || spun * c.scale >= SPIN_STEP_PX) {
+        if (rescale || c.color !== shownColor || c.ring !== ringKey || c.detail !== detail || spun * c.scale >= opts.spinStep) {
           if (c.scale !== scale) this.fit(c, p, scale);
           const g = c.g;
           g.setTransform(1, 0, 0, 1, 0, 0);
           g.clearRect(0, 0, c.canvas.width, c.canvas.height);
           g.setTransform(scale, 0, 0, scale, c.canvas.width / 2, c.canvas.height / 2);
           c.pattern ??= g.createPattern(art.surface, 'repeat-x');
-          this.paint(g, p, s, art, c.pattern, color, scroll, px, !low);
+          if (art.clouds) c.cloudPattern ??= g.createPattern(art.clouds, 'repeat-x');
+          this.paint(g, p, s, art, { surface: c.pattern, clouds: c.cloudPattern }, params);
           c.scale = scale;
-          c.owner = p.owner;
+          c.color = shownColor;
           c.ring = ringKey;
+          c.detail = detail;
           c.scroll = scroll;
         }
         c.used = clock;
@@ -168,13 +233,12 @@ export class PlanetLayer {
       } else {
         ctx.save();
         ctx.translate(p.x, p.y);
-        let pattern = this.patterns.get(p.id);
-        if (art && pattern === undefined) this.patterns.set(p.id, (pattern = ctx.createPattern(art.surface, 'repeat-x')));
-        this.paint(ctx, p, s, art, pattern ?? null, color, scroll, px, !low);
+        this.paint(ctx, p, s, art, this.directPatterns(ctx, p, art), params);
         ctx.restore();
       }
 
-      this.drawLive(ctx, world, p, s, color, px, hover === p.id, clock, reduced, low);
+      if (s.flood < 1) this.drawFlood(ctx, p, s, art, { ...params, color, lit: lit(color) });
+      this.drawLive(ctx, world, p, s, color, px, hover === p.id, clock, low, liveRing, art, scroll, opts);
       if (p.owner !== NEUTRAL) this.drawProduction(ctx, p, color, px, clock);
     }
 
@@ -191,6 +255,25 @@ export class PlanetLayer {
     }
   }
 
+  /** 켤 도시 불빛 수: 크기(생산)만큼 있는 도시 중 궤도 병력이 찰수록 더 많이. 위험 상태면 대부분 정전 */
+  private litCount(p: Planet, art: PlanetArt, low: boolean): number {
+    const total = art.lights.length / 3;
+    const garrison = p.owner === NEUTRAL ? 0 : p.orbitCount[p.owner];
+    // 10 단계로 끊어 병력이 한 기씩 늘 때마다 캐시를 다시 그리지 않게
+    const k = Math.round(Math.min(1, 0.2 + (0.8 * garrison) / p.capacity) * 10) / 10;
+    return Math.round(total * k * (low ? 0.35 : 1));
+  }
+
+  /** 화면에 직접 그릴 때 쓰는 패턴 (캐시 캔버스의 패턴은 그 컨텍스트 전용이라 따로 둔다) */
+  private directPatterns(ctx: CanvasRenderingContext2D, p: Planet, art: PlanetArt | null): Patterns {
+    let pats = this.patterns.get(p.id);
+    if (!pats && art) {
+      pats = { surface: ctx.createPattern(art.surface, 'repeat-x'), clouds: art.clouds ? ctx.createPattern(art.clouds, 'repeat-x') : null };
+      this.patterns.set(p.id, pats);
+    }
+    return pats ?? { surface: null, clouds: null };
+  }
+
   private bake(p: Planet, s: PlanetState, deadline: number): void {
     if (performance.now() > deadline) return;
     s.baker ??= new PlanetBaker(p);
@@ -203,7 +286,7 @@ export class PlanetLayer {
   private cache(p: Planet, s: PlanetState, scale: number): PlanetCache {
     if (!s.cache) {
       const canvas = makeCanvas(1, 1);
-      s.cache = { canvas, g: canvas.getContext('2d')!, pattern: null, scale: -1, scroll: -1, owner: -1, ring: -2, used: 0 };
+      s.cache = { canvas, g: canvas.getContext('2d')!, pattern: null, cloudPattern: null, scale: -1, scroll: -1, color: '', ring: -2, detail: -1, used: 0 };
       this.fit(s.cache, p, scale);
     }
     return s.cache;
@@ -216,25 +299,18 @@ export class PlanetLayer {
   }
 
   /** 행성 하나를 원점 기준으로 그린다 (캐시 캔버스 또는 화면에 직접) */
-  private paint(
-    g: CanvasRenderingContext2D,
-    p: Planet,
-    s: PlanetState,
-    art: PlanetArt | null,
-    pattern: CanvasPattern | null,
-    color: string,
-    scroll: number,
-    px: number,
-    ring: boolean,
-  ): void {
+  private paint(g: CanvasRenderingContext2D, p: Planet, s: PlanetState, art: PlanetArt | null, pats: Patterns, o: PaintParams): void {
     const R = p.radius;
     const A = p.atmosphereRadius;
     const twoPi = Math.PI * 2;
+    const { color, px } = o;
+    // 점령 연출 중의 이전 모습은 주인이 바뀐 뒤에도 중립으로 그려야 하므로 소유자가 아니라 색으로 판단한다
+    const neutral = color === NEUTRAL_RING;
 
     // 대기: 표면에서 경계로 갈수록 옅어지는 소유자 색 (중립은 단색으로 아주 옅게)
     g.beginPath();
     g.arc(0, 0, A, 0, twoPi);
-    if (p.owner === NEUTRAL) {
+    if (neutral) {
       g.fillStyle = 'rgba(184,196,214,0.035)';
     } else {
       const atmo = g.createRadialGradient(0, 0, R * 0.9, 0, 0, A);
@@ -247,7 +323,7 @@ export class PlanetLayer {
     g.fill();
 
     // 광륜: 표면 바로 바깥의 부드러운 빛
-    if (p.owner !== NEUTRAL) {
+    if (!neutral) {
       g.globalCompositeOperation = 'lighter';
       g.globalAlpha = 0.36;
       drawSprite(g, softSprite(color), 0, 0, R * 1.65);
@@ -255,19 +331,27 @@ export class PlanetLayer {
       g.globalCompositeOperation = 'source-over';
     }
 
-    // 표면 (가로로 이어지는 텍스처를 밀어서 자전) + 고정 조명
+    // 표면 (가로로 이어지는 텍스처를 밀어서 자전) + 구름 (조금 더 빨리 흐른다) + 고정 조명 + 밤쪽 불빛
     g.beginPath();
     g.arc(0, 0, R, 0, twoPi);
-    if (art && pattern) {
+    if (art && pats.surface) {
       const m = this.matrix;
       m.a = m.d = 1 / art.scale;
       m.b = m.c = 0;
-      m.e = -R - scroll;
+      m.e = -R - o.scroll;
       m.f = -R;
-      pattern.setTransform(m);
-      g.fillStyle = pattern;
+      pats.surface.setTransform(m);
+      g.fillStyle = pats.surface;
       g.fill();
+      if (pats.clouds) {
+        m.e = -R - o.cloudScroll;
+        pats.clouds.setTransform(m);
+        g.fillStyle = pats.clouds;
+        g.fill();
+      }
       g.drawImage(art.shade, -R, -R, R * 2, R * 2);
+      if (o.lit > 0) drawCityLights(g, art, R, o.scroll, o.lit, color, px);
+      if (o.extras) drawRimScatter(g, R, art.haze, px);
     } else {
       // 굽기 전 한두 프레임만 보이는 대체 그림
       const fallback = g.createRadialGradient(-R * 0.4, -R * 0.4, R * 0.1, 0, 0, R);
@@ -288,10 +372,61 @@ export class PlanetLayer {
     g.arc(0, 0, R - 0.4, 0, twoPi);
     g.stroke();
 
-    if (ring) this.drawDefenseRing(g, 0, 0, p, s, color, px, 1);
+    if (o.ring) this.drawDefenseRing(g, 0, 0, p, s, color, px, 1);
   }
 
-  /** 매 프레임 바뀌는 것들: 마우스 강조, 피격 번쩍임, 대기권 경계 점선, 점령 연출, 위험 고리 */
+  /**
+   * 점령 연출: 공격군이 들어온 쪽 표면에서 새 주인의 모습(대기 · 광륜 · 가장자리 · 고리 · 불빛)이 물결처럼 번져
+   * 0.8초 만에 행성 전체를 덮는다. 물결 앞머리는 밝게, 덮인 표면은 잠깐 새 주인 색으로 물든다.
+   */
+  private drawFlood(ctx: CanvasRenderingContext2D, p: Planet, s: PlanetState, art: PlanetArt | null, o: PaintParams): void {
+    const R = p.radius, A = p.atmosphereRadius;
+    const twoPi = Math.PI * 2;
+    const e = 1 - Math.pow(1 - s.flood, 3);
+    const ex = p.x + Math.cos(s.entry) * R, ey = p.y + Math.sin(s.entry) * R;
+    // 들어온 자리에서 반대쪽 대기권 끝까지 = R + A
+    const rad = Math.max(0.1, e * (R + A + 2));
+    const fade = 1 - s.flood;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(ex, ey, rad, 0, twoPi);
+    ctx.clip();
+    ctx.translate(p.x, p.y);
+    this.paint(ctx, p, s, art, this.directPatterns(ctx, p, art), o);
+    ctx.restore();
+
+    ctx.globalCompositeOperation = 'lighter';
+    // 덮인 표면을 새 색으로 잠깐 물들인다
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, R, 0, twoPi);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.arc(ex, ey, rad, 0, twoPi);
+    ctx.fillStyle = withAlpha(o.color, 0.42 * fade);
+    ctx.fill();
+    ctx.restore();
+    // 물결 앞머리 (대기권 안쪽만)
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, A, 0, twoPi);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.arc(ex, ey, rad, 0, twoPi);
+    ctx.strokeStyle = withAlpha(mixHex(o.color, '#ffffff', 0.45), 0.9 * fade);
+    ctx.lineWidth = Math.max(2.4 * o.px, 1.4);
+    ctx.stroke();
+    ctx.globalAlpha = 0.35 * fade;
+    ctx.lineWidth = Math.max(7 * o.px, 4);
+    ctx.strokeStyle = o.color;
+    ctx.stroke();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /** 매 프레임 바뀌는 것들: 마우스 강조, 피격 번쩍임, 포위 표시, 대기권 경계 점선, 위험 고리 · 불길 */
   private drawLive(
     ctx: CanvasRenderingContext2D,
     world: World,
@@ -301,9 +436,13 @@ export class PlanetLayer {
     px: number,
     hovered: boolean,
     clock: number,
-    reduced: boolean,
     low: boolean,
+    liveRing: boolean,
+    art: PlanetArt | null,
+    scroll: number,
+    opts: PlanetDrawOptions,
   ): void {
+    const { reduced } = opts;
     const R = p.radius;
     const twoPi = Math.PI * 2;
     ctx.beginPath();
@@ -336,25 +475,13 @@ export class PlanetLayer {
     ctx.setLineDash([]);
     ctx.lineDashOffset = 0;
 
+    if (sinceHit < SIEGE_TIME && p.lastAssaultBy !== p.owner) this.drawSiege(ctx, world, p, px, clock, sinceHit, reduced);
+
     if (s.hit > 0 && p.owner !== NEUTRAL) {
       ctx.globalCompositeOperation = 'lighter';
       ctx.globalAlpha = s.hit * 0.25;
       drawSprite(ctx, softSprite(color), p.x, p.y, R * 1.65);
       ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = 'source-over';
-    }
-
-    // 점령 연출: 새 주인의 색이 시계 방향으로 행성을 덮으며 지나간다
-    if (s.sweep < 1) {
-      const e = 1 - Math.pow(1 - s.sweep, 3);
-      const a0 = -Math.PI / 2;
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.beginPath();
-      ctx.moveTo(p.x, p.y);
-      ctx.arc(p.x, p.y, R, a0, a0 + e * twoPi);
-      ctx.closePath();
-      ctx.fillStyle = withAlpha(s.sweepColor, 0.55 * (1 - s.sweep));
-      ctx.fill();
       ctx.globalCompositeOperation = 'source-over';
     }
 
@@ -368,7 +495,8 @@ export class PlanetLayer {
     }
 
     const pulse = reduced ? 1 : 0.55 + 0.45 * Math.sin(clock * 9);
-    if (low) this.drawDefenseRing(ctx, p.x, p.y, p, s, color, px, pulse);
+    if (liveRing) this.drawDefenseRing(ctx, p.x, p.y, p, s, color, px, low ? pulse : 1);
+    if (low && art) this.drawDamage(ctx, p, s, art, scroll, clock, opts);
     if (low || s.hit > 0) {
       // 피격 · 위험 시 고리가 번쩍인다
       ctx.globalCompositeOperation = 'lighter';
@@ -382,6 +510,82 @@ export class PlanetLayer {
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
     }
+  }
+
+  /**
+   * 포위당하는 중: 대기권 경계에 공격자 색 꺾쇠가 안쪽을 겨누며 천천히 돈다.
+   * 꺾쇠 크기 = 대기권 안 공격측 비율 (강하 한 발의 피해가 공격측 / (공격측 + 수비측) 에 비례하므로, 클수록 잘 깎이는 중)
+   */
+  private drawSiege(ctx: CanvasRenderingContext2D, world: World, p: Planet, px: number, clock: number, sinceHit: number, reduced: boolean): void {
+    const by = p.lastAssaultBy;
+    const atk = p.presence[by] ?? 0, def = p.presence[p.owner] ?? 0;
+    const share = atk / Math.max(1, atk + def);
+    const rec = 1 - sinceHit / SIEGE_TIME;
+    const A = p.atmosphereRadius;
+    // 화면에서 일정한 크기지만, 축소했을 때 행성보다 커 보이지 않게 대기권 두께의 일부로 묶는다
+    const size = Math.min((5 + 5 * share) * px, (A - p.radius) * (0.3 + 0.25 * share));
+    const half = (size * 0.7) / A;
+    const rot = reduced ? 0 : clock * 0.5;
+    // 속이 빈 V 꺾쇠가 경계선에 걸쳐 안쪽을 겨눈다 (안을 채운 화살촉은 함선과 헷갈린다)
+    const tip = A - size * 0.45, base = A + size * 0.55;
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) {
+      const a = rot + (i * Math.PI) / 2 + Math.PI / 4;
+      ctx.moveTo(p.x + Math.cos(a - half) * base, p.y + Math.sin(a - half) * base);
+      ctx.lineTo(p.x + Math.cos(a) * tip, p.y + Math.sin(a) * tip);
+      ctx.lineTo(p.x + Math.cos(a + half) * base, p.y + Math.sin(a + half) * base);
+    }
+    const color = world.factions[by].color;
+    ctx.lineJoin = 'miter';
+    ctx.lineCap = 'butt';
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.2 * rec;
+    ctx.lineWidth = 4.5 * px;
+    ctx.stroke();
+    ctx.globalAlpha = 0.3 + 0.6 * rec;
+    ctx.strokeStyle = mixHex(color, '#ffffff', 0.25);
+    ctx.lineWidth = 1.8 * px;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /**
+   * 방어도가 바닥난 행성: 큰 도시 자리(표면과 같이 돈다)에서 불길이 일렁이고, 연기와 불티가 피어오른다.
+   * 연기 · 불티는 부가 연출(품질)과 움직임 줄이기 설정을 따른다
+   */
+  private drawDamage(ctx: CanvasRenderingContext2D, p: Planet, s: PlanetState, art: PlanetArt, scroll: number, clock: number, opts: PlanetDrawOptions): void {
+    const { reduced, extras, fx, bloom, dt } = opts;
+    const R = p.radius;
+    const sev = 1 - s.shown / LOW;
+    const fires = 2 + Math.round(sev * 3);
+    const fire = glowSprite(FIRE);
+    const glow = bloom?.g ?? null;
+    ctx.globalCompositeOperation = 'lighter';
+    // 큰 도시부터, 지금 앞면에 보이는 자리만 (돌아서 뒤로 넘어가면 다음 도시가 탄다)
+    const total = art.lights.length / 3;
+    for (let i = 0, lit = 0; i < total && lit < fires; i++) {
+      if (!lightAt(art.lights, i, R, scroll, spot)) continue;
+      lit++;
+      const x = p.x + spot.x, y = p.y + spot.y;
+      const flick = reduced ? 0.7 : 0.6 + 0.4 * Math.sin(clock * (9 + i * 1.7) + i * 2.3) * Math.sin(clock * 5.3 + i);
+      const r = 3 + 3.5 * sev;
+      ctx.globalAlpha = 0.5 + 0.45 * flick;
+      drawSprite(ctx, fire, x, y, r);
+      if (glow && bloom) {
+        glow.globalAlpha = 0.5 * flick;
+        drawSprite(glow, fire, x, y, r * 2);
+        bloom.mark(x, y, r * 2);
+      }
+      if (extras && !reduced) {
+        if (Math.random() < dt * (1 + 3 * sev)) fx.smoke(x, y, 5 + 4 * sev);
+        if (Math.random() < dt * 0.9) fx.embers(x, y, 2, FIRE, 22, 0.8);
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    if (glow) glow.globalAlpha = 1;
   }
 
   /** 24칸 방어도 고리. pulse = 위험 상태 깜빡임 (1 = 최대) */
@@ -412,7 +616,8 @@ export class PlanetLayer {
     }
     if (s.shown > 0.0005) {
       arc(s.shown);
-      g.strokeStyle = s.shown < 0.3 ? withAlpha(LOW_DEFENSE, 0.6 + 0.4 * pulse) : p.owner === NEUTRAL ? NEUTRAL_RING : color;
+      // 중립의 color 는 이미 NEUTRAL_RING (점령 연출 중의 이전 모습도 색으로 넘어온다)
+      g.strokeStyle = s.shown < LOW ? withAlpha(LOW_DEFENSE, 0.6 + 0.4 * pulse) : color;
       g.stroke();
     }
     g.setLineDash([]);
@@ -505,4 +710,64 @@ export class PlanetLayer {
   private ownerColor(world: World, p: Planet): string {
     return p.owner === NEUTRAL ? NEUTRAL_RING : world.factions[p.owner].color;
   }
+}
+
+const mod = (a: number, m: number) => ((a % m) + m) % m;
+
+/** 주기 period 위에서 두 위치의 거리 */
+function wrapDist(a: number, b: number, period: number): number {
+  const d = Math.abs(a - b) % period;
+  return Math.min(d, period - d);
+}
+
+/**
+ * 밤쪽 도시 불빛: 진영 색이 섞인 전등 빛 점들 (밝기 세 단계로 묶어 칠한다). 큰 도시는 은은한 빛무리도 얹는다.
+ * 캐시를 다시 그릴 때만 불리므로 점 수십 개는 부담이 없다
+ */
+function drawCityLights(g: CanvasRenderingContext2D, art: PlanetArt, R: number, scroll: number, count: number, color: string, px: number): void {
+  const tint = mixHex(color, CITY_LIGHT, 0.3);
+  const paths = [new Path2D(), new Path2D(), new Path2D()];
+  const halo = softSprite(tint);
+  g.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < count; i++) {
+    if (!lightAt(art.lights, i, R, scroll, spot)) continue;
+    const night = nightFactor(spot.x, spot.y, R);
+    if (night < 0.05) continue;
+    const w = art.lights[i * 3 + 2];
+    const a = night * (0.5 + 0.5 * w);
+    const size = Math.max(1.1 * px, 0.5 + 0.8 * w);
+    paths[a > 0.66 ? 2 : a > 0.33 ? 1 : 0].rect(spot.x - size / 2, spot.y - size / 2, size, size);
+    // 큰 도시는 불빛이 번진 빛무리 (멀리서도 '사람이 사는 행성'으로 읽히게)
+    if (w > 0.55 && night > 0.3) {
+      g.globalAlpha = 0.5 * night * w;
+      drawSprite(g, halo, spot.x, spot.y, Math.max(3 * px, 2.6 + 2 * w));
+    }
+  }
+  g.fillStyle = tint;
+  paths.forEach((path, b) => {
+    g.globalAlpha = [0.4, 0.7, 1][b];
+    g.fill(path);
+  });
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'source-over';
+}
+
+/** 가장자리 대기 산란: 광원(왼쪽 위) 쪽 둘레가 대기 색으로 옅게 빛나고 반대쪽으로 사라진다 */
+function drawRimScatter(g: CanvasRenderingContext2D, R: number, haze: string, px: number): void {
+  const grad = g.createLinearGradient(-R * 0.75, -R * 0.8, R * 0.45, R * 0.5);
+  grad.addColorStop(0, withAlpha(haze, 0.75));
+  grad.addColorStop(0.45, withAlpha(haze, 0.25));
+  grad.addColorStop(1, withAlpha(haze, 0));
+  g.globalCompositeOperation = 'lighter';
+  g.strokeStyle = grad;
+  g.beginPath();
+  g.arc(0, 0, R * 1.03, 0, Math.PI * 2);
+  g.globalAlpha = 0.35;
+  g.lineWidth = Math.max(R * 0.22, 3 * px);
+  g.stroke();
+  g.globalAlpha = 0.8;
+  g.lineWidth = Math.max(R * 0.06, 1.1 * px);
+  g.stroke();
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'source-over';
 }

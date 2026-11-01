@@ -1,4 +1,5 @@
 import type { World } from '../sim/world';
+import type { Bloom } from './bloom';
 import { inView, type Effects, type ViewRect } from './effects';
 import { drawSprite, glowSprite, mixHex, softSprite, withAlpha } from './sprites';
 
@@ -65,8 +66,8 @@ export class GateLayer {
     this.closing.length = w;
   }
 
-  /** 소용돌이 본체 (병력 아래) */
-  draw(ctx: CanvasRenderingContext2D, world: World, zoom: number, view: ViewRect, clock: number, reduced: boolean): void {
+  /** 소용돌이 본체 (병력 아래). bloom = 켜져 있으면 소용돌이 빛을 발광 버퍼에도 넣는다 */
+  draw(ctx: CanvasRenderingContext2D, world: World, zoom: number, view: ViewRect, clock: number, reduced: boolean, bloom: Bloom | null): void {
     if (world.gates.length === 0 && this.closing.length === 0) return;
     const color = invaderColor(world);
     const px = 1 / zoom;
@@ -79,6 +80,7 @@ export class GateLayer {
       const pulse = spawning ? 0.5 + 0.5 * Math.sin(clock * 7) : 0;
       const R = gateRadius(k) * (1 + pulse * 0.06);
       drawVortex(ctx, style, g.x, g.y, R, k, clock * spin * 1.8 + g.id, pulse, 1);
+      if (bloom) glowInto(bloom, color, g.x, g.y, R, 0.35 + 0.35 * k + pulse * 0.3);
       // 출현 중: 바깥으로 퍼지는 박동 고리 + 중심 섬광
       if (spawning) {
         ctx.globalCompositeOperation = 'lighter';
@@ -104,6 +106,7 @@ export class GateLayer {
       const u = Math.min(1, (clock - c.at) / CLOSE_TIME);
       const R = R0 * (1 - u * u);
       if (R > 0.5) drawVortex(ctx, style, c.x, c.y, R, 1, clock * spin * 1.8 + c.id + u * u * spin * 4, 0, 1 - u);
+      if (bloom) glowInto(bloom, color, c.x, c.y, R0 * (0.6 + u * 0.3), Math.sin(u * Math.PI) * 0.8 + (1 - u) * 0.3);
       ctx.globalCompositeOperation = 'lighter';
       ctx.globalAlpha = Math.sin(u * Math.PI) * 0.8;
       drawSprite(ctx, glowSprite(color), c.x, c.y, R0 * (0.45 + u * 0.3));
@@ -111,6 +114,15 @@ export class GateLayer {
       ctx.globalCompositeOperation = 'source-over';
     }
   }
+}
+
+/** 발광 버퍼에 게이트 빛 (흐리면 소용돌이 둘레가 진영 색으로 번진다) */
+function glowInto(bloom: Bloom, color: string, x: number, y: number, R: number, a: number): void {
+  const g = bloom.g;
+  g.globalAlpha = Math.min(1, a);
+  drawSprite(g, glowSprite(color), x, y, R * 1.6);
+  g.globalAlpha = 1;
+  bloom.mark(x, y, R * 1.6);
 }
 
 interface VortexStyle {

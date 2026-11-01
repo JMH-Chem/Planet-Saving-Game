@@ -2,17 +2,21 @@ import { CONFIG } from '../config';
 import { NEUTRAL, PLAYER, type GameEvent, type Planet } from '../sim/types';
 import type { World } from '../sim/world';
 import { Background } from './background';
+import { Bloom } from './bloom';
 import type { Camera } from './camera';
 import { Effects, inView, type ViewRect } from './effects';
 import { drawGateLabels, GateLayer, invaderColor } from './gates';
 import { OrderFx, orderColor, type OrderFeedback, type OrderKind } from './orderFx';
 import { clamp, placeBox, type Box } from './placement';
 import { PlanetLayer } from './planets';
+import { parseQualityParam, QualityManager, type QualityLevel } from './quality';
 import { mixHex, roundRect, withAlpha } from './sprites';
+import { TerritoryLayer } from './territoryLayer';
 import { UnitLayer } from './units';
 
 export { withAlpha } from './sprites';
 export type { OrderFeedback, OrderKind } from './orderFx';
+export type { QualityLevel } from './quality';
 
 /** 입력 쪽에서 넘겨주는 화면 오버레이 상태 */
 export interface OverlayState {
@@ -29,7 +33,20 @@ export interface OverlayState {
 
 const SIZE_LABEL = { small: '소형', medium: '중형', large: '대형' } as const;
 const LOSS_COLOR = '#ff5d5d';
+const NEUTRAL_COLOR = '#b8c4d6';
 const DT = 1 / CONFIG.tickRate;
+
+/** 발광 합성 세기 (관전 화면은 차분하게) */
+const BLOOM_INTENSITY = 0.55;
+const SPECTATOR_BLOOM = 0.35;
+/**
+ * 대량 격추: 이 크기(월드 단위) 칸 하나에서 한 틱에 이만큼 넘게 터지면 충격파 + 파편을 더 얹는다.
+ * 초당 HEAVY_RATE 번까지만 (한꺼번에 몰리면 HEAVY_BURST 번) — 큰 전투에서 고리가 화면을 덮지 않게
+ */
+const HEAVY_CELL = 70;
+const HEAVY_PER_TICK = 2.5;
+const HEAVY_RATE = 4;
+const HEAVY_BURST = 3;
 
 /**
  * 캔버스 위에 떠 있는 HUD 창 (alerts.ts 의 피할 영역과 같다). 툴팁 · 커서 힌트를 이 밑에 그리면 보이지 않는다.
@@ -38,6 +55,12 @@ const DT = 1 / CONFIG.tickRate;
 const HUD_IDS = ['minimap-wrap', 'minimap-tools', 'toasts', 'banner'];
 /** HUD 창 위치를 다시 재는 간격(초). 툴팁이 떠 있는 동안 매 프레임 레이아웃을 강제하지 않도록 */
 const HUD_BOX_TTL = 0.25;
+
+/**
+ * 자동 품질이 마지막으로 고른 단계. 렌더러는 판(과 메뉴 배경)마다 새로 만들어지므로, 느린 기기가 판마다 상에서 다시
+ * 시작해 몇 초씩 버벅이지 않게 모듈에 기억해 두고 다음 렌더러가 거기서 시작한다
+ */
+let learnedQuality: QualityLevel = 'high';
 
 /** 움직임 줄이기 설정. 렌더러는 판마다 새로 만들어지므로 리스너 대신 한 곳에서 매번 읽는다 */
 const motionQuery = typeof window !== 'undefined' ? window.matchMedia?.('(prefers-reduced-motion: reduce)') : undefined;
@@ -65,7 +88,10 @@ function watchDpr(): void {
 
 /**
  * 캔버스 렌더러. 그리는 순서:
- * 배경 → 행성(대기권 · 표면 · 고리) → 워프 게이트 · 명령 경로 → 연기/파편 → 병력 → 가산 효과(레이저/폭발) → 이름표 · 글자 → 화면 오버레이
+ * 배경 → 영토 → 행성(대기권 · 표면 · 고리) → 워프 게이트 · 명령 경로 → 연기/파편 → 병력 → 가산 효과(레이저/폭발)
+ * → 발광(bloom) 합성 → 이름표 · 글자 → 화면 오버레이
+ *
+ * 품질(high / medium / low)은 실제 프레임 간격으로 고른다 (quality.ts). ?quality=low|medium|high 로 고정할 수 있다.
  */
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
@@ -91,6 +117,14 @@ export class Renderer {
   /** 관전(메뉴 배경): 플레이어가 없으므로 플레이어 시점 연출(화면 흔들림 · 점령!/함락)을 하지 않는다 */
   private readonly spectator: boolean;
   private gates = new GateLayer();
+  private territory = new TerritoryLayer();
+  private bloom = new Bloom();
+  private qm: QualityManager;
+  /** 직전 render() 시작 시각과 그 그리기에 든 시간 (품질 판단용, ms) */
+  private lastFrameAt = 0;
+  private lastRenderMs = 0;
+  /** 대량 격추 연출을 더 낼 수 있는 횟수 (초당 HEAVY_RATE 씩 찬다) */
+  private heavyTokens = HEAVY_BURST;
   private hudBoxes: Box[] = [];
   private hudBoxesAt = -Infinity;
 
@@ -102,10 +136,26 @@ export class Renderer {
     this.reduced = prefersReducedMotion();
     this.spectator = !!opts.spectator;
     this.fx = new Effects(this.reduced ? 1500 : 3000);
+    this.qm = new QualityManager({ forced: typeof location !== 'undefined' ? parseQualityParam(location.search) : null, initial: learnedQuality });
     if (typeof window !== 'undefined') {
       if (!dprQuery) watchDpr();
       dprTarget = this;
     }
+  }
+
+  /** 지금 그래픽 품질 (자동 또는 ?quality= 로 고정) */
+  get quality(): QualityLevel {
+    return this.qm.level;
+  }
+
+  /** 미니맵 바탕에 깔 영토 그림 (칸 = 1px) 과 그 그림이 덮는 월드 크기 */
+  get territoryImage(): { canvas: HTMLCanvasElement; width: number; height: number } | null {
+    return this.territory.image;
+  }
+
+  private applyQuality(): void {
+    const q = this.qm.settings;
+    this.bloom.configure(this.width, this.height, q.bloomScale, q.bloomLevels);
   }
 
   /** 배율만 바뀌었을 때(창을 다른 모니터로 옮김): 같은 CSS 크기로 백버퍼를 다시 잡는다 */
@@ -122,6 +172,7 @@ export class Renderer {
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
     this.bg.resize(width, height);
+    this.applyQuality();
     this.hudBoxesAt = -Infinity;
   }
 
@@ -150,12 +201,14 @@ export class Renderer {
     const ticks = Math.max(1, Math.round((world.time - this.simTime) / DT));
     // 부하에 따라 입자 수를 줄인다 (LOD)
     const load = fx.load;
-    let lod = this.reduced ? 0.5 : 1;
+    const q = this.qm.settings;
+    let lod = (this.reduced ? 0.5 : 1) * q.particles;
     if (load > 0.75) lod *= 0.3;
     else if (load > 0.45) lod *= 0.6;
     let deaths = 0;
     for (const e of events) if (e.type === 'death' && inView(view, e.x, e.y)) deaths++;
     const deathsPerTick = deaths / ticks;
+    if (q.heavyDeaths && !this.spectator && deathsPerTick >= HEAVY_PER_TICK) this.heavyDeaths(events, world, ticks, lod);
     if (deathsPerTick > 24) lod *= 0.5;
     let shots = 0;
 
@@ -230,9 +283,53 @@ export class Renderer {
     if (deathsPerTick >= 8) this.shake(Math.min(3.5, 0.8 + deathsPerTick * 0.12));
   }
 
+  /**
+   * 대량 격추: 격추 자리를 굵은 칸으로 묶어 한 칸에 몰려 터진 곳에만 큰 충격파 + 섬광 + 파편.
+   * 전선 전체에 고르게 흩어진 격추는 평소대로 두고, 돌파가 수비대를 뚫는 순간 같은 '한 덩어리가 녹는' 장면만 강조한다
+   */
+  private heavyDeaths(events: readonly GameEvent[], world: World, ticks: number, lod: number): void {
+    const cells = new Map<number, { x: number; y: number; n: number; f: number }>();
+    for (const e of events) {
+      if (e.type !== 'death' || !inView(this.view, e.x, e.y)) continue;
+      const key = Math.floor(e.x / HEAVY_CELL) * 4096 + Math.floor(e.y / HEAVY_CELL);
+      const c = cells.get(key);
+      if (c) {
+        c.x += e.x;
+        c.y += e.y;
+        c.n++;
+        c.f = e.faction;
+      } else {
+        cells.set(key, { x: e.x, y: e.y, n: 1, f: e.faction });
+      }
+    }
+    const fx = this.fx;
+    for (const c of cells.values()) {
+      if (c.n / ticks < HEAVY_PER_TICK || this.heavyTokens < 1) continue;
+      this.heavyTokens--;
+      const x = c.x / c.n, y = c.y / c.n;
+      const color = world.factions[c.f].color;
+      const k = Math.min(1, c.n / ticks / 10);
+      fx.ring(x, y, 4, 30 + 36 * k, mixHex(color, '#ffffff', 0.35), 0.55, 2.4, true);
+      fx.ring(x, y, 2, 16 + 16 * k, color, 0.35, 3.4, false);
+      fx.flash(x, y, 22 + 16 * k, color, 0.4);
+      fx.flash(x, y, 9, '#ffffff', 0.14);
+      fx.sparks(x, y, Math.round(10 * lod), mixHex(color, '#ffffff', 0.4), 200, 0.6);
+      fx.debris(x, y, Math.max(2, Math.round((5 + 7 * k) * lod)), color, 60);
+    }
+  }
+
   private onCapture(world: World, p: Planet, from: number, to: number, lod: number): void {
     const color = world.factions[to].color;
-    this.planets.captured(p, color);
+    // 새 주인 색이 번지기 시작할 자리: 대기권 안에서 점령한 진영 병력의 평균 방향 (없으면 위쪽)
+    let ax = 0, ay = 0;
+    for (const u of world.units) {
+      if (u.faction === to && u.inPlanet === p.id) {
+        ax += u.x - p.x;
+        ay += u.y - p.y;
+      }
+    }
+    const entry = ax === 0 && ay === 0 ? -Math.PI / 2 : Math.atan2(ay, ax);
+    this.planets.captured(p, from === NEUTRAL ? NEUTRAL_COLOR : world.factions[from].color, entry);
     const visible = inView(this.view, p.x, p.y, p.atmosphereRadius + 60);
     // 플레이어 입장: 1 = 얻음, -1 = 잃음. 관전(메뉴 배경)에서는 1번 진영도 AI 일 뿐이니 중립적으로 보여 준다
     const side = this.spectator ? 0 : to === PLAYER ? 1 : from === PLAYER ? -1 : 0;
@@ -255,15 +352,26 @@ export class Renderer {
   }
 
   render(world: World, cam: Camera, selection: ReadonlySet<number>, alpha: number, overlay: OverlayState, dt: number): void {
+    // 품질: 직전 프레임과의 실제 간격 + 직전 그리기 시간으로 판단 (dt 는 0.1초로 잘려 있어 쓰지 않는다)
+    const t0 = performance.now();
+    if (this.lastFrameAt > 0 && this.qm.sample(t0 - this.lastFrameAt, this.lastRenderMs)) {
+      learnedQuality = this.qm.level;
+      this.applyQuality();
+    }
+    this.lastFrameAt = t0;
+    const q = this.qm.settings;
+
     this.clock += dt;
     this.simTime = world.time;
     this.reduced = prefersReducedMotion();
+    this.heavyTokens = Math.min(HEAVY_BURST, this.heavyTokens + dt * HEAVY_RATE);
     const ctx = this.ctx;
     const zoom = cam.zoom;
     this.updateShake(dt);
     this.fx.update(dt);
     this.planets.update(world, dt);
     this.orders.update(dt);
+    this.territory.update(world, dt, q.territoryFill);
 
     // 보이는 월드 영역 (화면 밖은 그리지 않는다)
     const halfW = this.width / 2 / zoom, halfH = this.height / 2 / zoom;
@@ -285,14 +393,23 @@ export class Renderer {
     ctx.translate(this.width / 2 + this.shakeX, this.height / 2 + this.shakeY);
     ctx.scale(zoom, zoom);
     ctx.translate(-cam.x, -cam.y);
+    // 발광 버퍼도 같은 월드 좌표계로: 각 층이 자기 빛을 그리면서 함께 넣는다
+    const bloom = this.bloom.begin(cam.x, cam.y, zoom, this.shakeX, this.shakeY) ? this.bloom : null;
 
     this.drawWorldBounds(world, zoom);
-    this.planets.draw(ctx, world, zoom, view, overlay.hoverPlanet, this.clock, this.reduced);
-    this.gates.draw(ctx, world, zoom, view, this.clock, this.reduced);
+    this.territory.draw(ctx, view, zoom, this.spectator, q.territoryFill);
+    this.planets.draw(ctx, world, zoom, view, overlay.hoverPlanet, this.clock, { extras: q.planetExtras, spinStep: q.planetSpinStep, reduced: this.reduced, fx: this.fx, bloom, dt });
+    this.gates.draw(ctx, world, zoom, view, this.clock, this.reduced, bloom);
     this.orders.drawPaths(ctx, zoom);
     this.fx.drawUnder(ctx, view);
-    this.units.draw(ctx, world, selection, alpha, zoom, view, this.clock, dt, this.fx, this.reduced);
-    this.fx.drawGlow(ctx, view, zoom);
+    this.units.draw(ctx, world, selection, alpha, zoom, view, this.clock, dt, this.fx, { bloom, reduced: this.reduced });
+    this.fx.drawGlow(ctx, view, zoom, bloom);
+    if (bloom) {
+      // 이름표 · 글자 밑에 합성해야 글자가 빛에 묻히지 않는다
+      ctx.save();
+      bloom.end(ctx, this.dpr, this.spectator ? SPECTATOR_BLOOM : BLOOM_INTENSITY);
+      ctx.restore();
+    }
     this.orders.drawMarkers(ctx, zoom, this.clock);
     this.planets.drawLabels(ctx, world, zoom, view, this.clock);
     drawGateLabels(ctx, world, zoom, view);
@@ -308,6 +425,7 @@ export class Renderer {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
+    this.lastRenderMs = performance.now() - t0;
   }
 
   private updateShake(dt: number): void {

@@ -175,6 +175,19 @@ export class Minimap {
     for (let gx = 250; gx < world.width; gx += 250) ctx.fillRect(Math.round(ox + gx * s), oy, 1, mh);
     for (let gy = 250; gy < world.height; gy += 250) ctx.fillRect(ox, Math.round(oy + gy * s), mw, 1);
 
+    // 영토: 큰 화면과 같은 장 (칸 = 1px 그림을 미니맵 크기로 늘리기만 하므로 공짜에 가깝다)
+    const terr = this.game.renderer.territoryImage;
+    if (terr) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(ox, oy, mw, mh);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = true;
+      ctx.globalAlpha = 0.75;
+      ctx.drawImage(terr.canvas, ox, oy, terr.width * s, terr.height * s);
+      ctx.restore();
+    }
+
     // 대기권 후광 → 병력 → 행성 순: 행성 색이 궤도 병력에 묻히지 않게 행성을 위에 그린다
     for (const p of world.planets) {
       ctx.beginPath();
