@@ -84,40 +84,77 @@ export const FACTION_NAMES = ['중립', '플레이어', '적 A', '적 B', '적 C
 export type Difficulty = 'easy' | 'normal' | 'hard';
 
 export interface AIProfile {
-  /** 판단 주기(초) */
+  /** 판단 주기(초) = 반응 속도 */
   thinkInterval: number;
-  /** 공격 시 요구하는 전력 배율 */
+  /** 전투 추정기가 낸 최소 병력에 곱하는 안전 배율 */
   attackMargin: number;
-  /** 수비대가 많을 때 포위 → 돌파 2단계 전술 사용 여부 */
+  /** 수비대가 많을 때 포위 → 돌파 2단계 전술 사용 여부 (false 면 돌파만 고른다) */
   usesStaging: boolean;
   /** 행성마다 남겨두는 예비 병력 비율(정원 대비) */
   reserveRatio: number;
   /** 한 번 판단에 새로 시작할 수 있는 공격 수 (여유 병력이 되면 두 곳을 동시에 친다) */
   launchesPerThink: number;
+  /** 동시에 진행하는 공격 작전 상한 */
+  maxOps: number;
   /** 다른 진영 행성의 공격 가치 배율 (1 보다 크면 중립을 다 먹기 전에도 상대 행성을 먼저 노린다) */
   enemyPressure: number;
   /**
-   * 다른 진영 행성을 칠 때, 그 진영이 주변(AI_REINFORCE_RADIUS)에 둔 병력을 이 비율만큼 수비대로 셈한다.
-   * 0 이면 궤도 수비대만 보고 들어갔다가 이웃 행성의 증원에 번번이 막힌다
+   * 다른 진영 행성을 칠 때, 그 진영이 AI_REINFORCE_RADIUS 안의 다른 행성 · 무리에서 도착 시각에 맞춰 보낼 수 있는
+   * 증원을 이 비율만큼 전투 추정에 넣는다. 0 이면 궤도 수비대만 보고 들어갔다가 이웃 행성의 증원에 번번이 막힌다
    */
   reinforceWeight: number;
+  /**
+   * 모성 경비 상한 (정원 대비): 모성 곁(600 안)의 적 병력 절반만큼 남기되 이 비율을 넘지 않는다.
+   * 적이 멀리 있는 초반엔 첫 확장을 늦추지 않고, 다가올수록 모성을 비우지 않는다
+   */
+  homeGuard: number;
+  /** 추정 착시: 상대 수비대를 이 배율로 본다 (1 미만 = 낙관해서 모자라게 보낸다) */
+  estimateBias: number;
+  /** 추정 잡음: 판단마다 수비대 수를 ±이 비율 안에서 잘못 본다 (AI 전용 시드 난수) */
+  estimateNoise: number;
+  /** 다가오는 적 무리의 진행 방향 · 속도로 도착을 예측해 미리 증원한다 (false 면 이미 붙은 적만 본다) */
+  projectThreats: boolean;
+  /** 위협 예측 지평(초): 이 시간 안에 닿을 무리만 센다 */
+  threatHorizon: number;
+  /** 진행 중인 작전을 매 판단 다시 추정해, 질 싸움이면 일찍 가장 가까운 아군 행성으로 물린다 */
+  retreatEarly: boolean;
+  /**
+   * 기회 공격: 공격을 막아 낸 직후 그 진영 행성의 가치를 올려 반격한다.
+   * (본대가 멀리 나가 수비가 얇은 행성은 증원 도착 추정(reinforceWeight)으로 저절로 싸게 보인다)
+   */
+  opportunism: boolean;
+  /** 우주 공간에 떨어진 작은 적 무리를 근처 병력으로 사냥한다 */
+  snipes: boolean;
+  /** 여러 행성에서 모은 병력의 도착 시각을 맞춘다 (가까운 무리를 늦게 출발) */
+  synchronize: boolean;
+  /** 본대 도착 전에 이웃 적 행성에 견제 병력을 보내 수비대 · 증원을 끌어낸다 */
+  feints: boolean;
 }
 
 /** reinforceWeight 가 세는 '곧 증원으로 올 수 있는' 병력의 반경 */
-export const AI_REINFORCE_RADIUS = 300;
+export const AI_REINFORCE_RADIUS = 450;
 
 export const AI_PROFILES: Record<Difficulty, AIProfile> = {
   easy: {
-    thinkInterval: 3.0, attackMargin: 2.0, usesStaging: false, reserveRatio: 0.3,
-    launchesPerThink: 1, enemyPressure: 1, reinforceWeight: 0,
+    thinkInterval: 3.5, attackMargin: 2.0, usesStaging: false, reserveRatio: 0.3,
+    launchesPerThink: 1, maxOps: 1, enemyPressure: 1, reinforceWeight: 0,
+    homeGuard: 0.3, estimateBias: 0.85, estimateNoise: 0.3,
+    projectThreats: false, threatHorizon: 0, retreatEarly: false,
+    opportunism: false, snipes: false, synchronize: false, feints: false,
   },
   normal: {
-    thinkInterval: 1.5, attackMargin: 1.5, usesStaging: true, reserveRatio: 0.2,
-    launchesPerThink: 1, enemyPressure: 1, reinforceWeight: 0.05,
+    thinkInterval: 3.0, attackMargin: 1.3, usesStaging: true, reserveRatio: 0.12,
+    launchesPerThink: 1, maxOps: 1, enemyPressure: 1, reinforceWeight: 0.5,
+    homeGuard: 0.25, estimateBias: 1, estimateNoise: 0.15,
+    projectThreats: false, threatHorizon: 0, retreatEarly: true,
+    opportunism: true, snipes: false, synchronize: false, feints: false,
   },
   hard: {
-    thinkInterval: 0.8, attackMargin: 1.25, usesStaging: true, reserveRatio: 0.12,
-    launchesPerThink: 2, enemyPressure: 1.5, reinforceWeight: 0.3,
+    thinkInterval: 0.8, attackMargin: 1.15, usesStaging: true, reserveRatio: 0.06,
+    launchesPerThink: 2, maxOps: 3, enemyPressure: 1.5, reinforceWeight: 1,
+    homeGuard: 0.1, estimateBias: 1, estimateNoise: 0,
+    projectThreats: true, threatHorizon: 15, retreatEarly: true,
+    opportunism: true, snipes: true, synchronize: true, feints: true,
   },
 };
 
