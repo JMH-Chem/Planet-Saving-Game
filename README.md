@@ -48,3 +48,15 @@ src/config.ts  밸런스 수치
 ```
 
 TypeScript + Vite + Canvas 2D + Web Audio. 외부 런타임 의존성 없음.
+
+## Codex 개선안 · 디자인 비교
+
+기본 디자인을 유지하면서 별도 실험안을 추가했다. 실행 후 메뉴의 **기존 디자인 / Codex 디자인**으로 바꾸거나, 주소 뒤에 `?design=codex`를 붙인다. 모드·난이도·시드를 유지하며 비교할 수 있고 단일 HTML 빌드에서도 동작한다.
+
+- [디자인 비교와 스크린샷](docs/DESIGN_COMPARISON.md)
+- [수정 내역과 다음 개발 순서](docs/CODEX_PLAN.md)
+
+```bash
+npm test -- --maxWorkers=1 --testTimeout=30000  # 긴 시뮬레이션을 포함한 전체 검사
+npm run test:browser                         # Chromium으로 두 디자인의 PC·터치 조작 검사
+```
