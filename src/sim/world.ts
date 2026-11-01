@@ -34,6 +34,52 @@ export interface WorldInit {
   planets: PlanetInit[];
 }
 
+/**
+ * 병력 하나의 운동 상태. 렌더러 · AI 가 알 필요 없는 시뮬레이션 내부 값이라 Unit 타입 밖(World.motion)에 둔다.
+ * 위치 · 체력처럼 판의 상태이므로 저장 · 리플레이 검증을 붙일 때는 이것도 함께 직렬화해야 한다.
+ */
+interface Motion {
+  /** 속도(px/s). 방향 = 함선이 향하는 쪽 */
+  vx: number;
+  vy: number;
+  /** 같은 명령으로 함께 출발한 무리 (null = 혼자) */
+  group: MoveGroup | null;
+  /** 이번 틱의 목표 지점과 그 지점의 속도 (궤도는 도는 점과 접선 속도, 그 밖에는 tx/ty 와 0) */
+  gx: number;
+  gy: number;
+  gvx: number;
+  gvy: number;
+}
+
+/**
+ * 한 명령으로 함께 출발한 무리. 남은 거리가 가장 긴 구성원이 최고 속도로 가고, 그보다 한참 먼저 닿을 구성원은
+ * 남은 거리 비율만큼 느리게 가서 거의 함께 도착한다 (CONFIG.formation.arriveWindow · minPace, World.pace).
+ */
+interface MoveGroup {
+  /** 직전 틱에 잰, 아직 이동 중인 구성원의 남은 거리 최댓값 */
+  lead: number;
+  /** 이번 틱에 재는 중인 최댓값 (다음 틱의 lead) */
+  next: number;
+  /** next 를 재기 시작한 틱 */
+  tick: number;
+}
+
+/** 이만큼(px) 가까워지면 슬롯에 도착한 것으로 보고 슬롯에 정확히 세운다 (슬롯 고도 · 대기권 안팎 판정을 그대로 지키려고) */
+const ARRIVE_EPS = 0.75;
+/** 도착 감속에 쓰는 감속도 = 가속 한계 × 이 값. 한계보다 조금 낮아야 슬롯을 지나치지 않는다 */
+const ARRIVE_BRAKE = 0.8;
+/** 슬롯 바로 앞에서는 속도를 남은 거리에 비례해 줄인다(1/s): 한 틱에 남은 거리의 27% 만 가서 마지막 몇 px 를 지나치지 않는다 */
+const ARRIVE_GAIN = 8;
+/** 이보다 느리면(px/s) 함선이 제자리에서 방향을 바꾼다 */
+const STOP_SPEED = 1;
+/** 궤도 병력의 겹침을 풀 때 내려갈 수 있는 최저 고도(표면 기준) */
+const MIN_ORBIT_ALT = 2;
+/**
+ * 겹침 풀기는 이 틱마다 한 번, 그만큼 크게 민다. 초당 몇 px 의 느린 이완이라 매 틱 할 까닭이 없고,
+ * 촘촘한 궤도 · 대형에서 쌍 검사가 틱 시간의 15% 가까이 들었다 (방어전 1000기 이상)
+ */
+const SEPARATE_EVERY = 3;
+
 export class World {
   readonly width: number;
   readonly height: number;
@@ -62,12 +108,23 @@ export class World {
   private nextUnitId = 1;
   private unitById = new Map<number, Unit>();
   private pending: Command[] = [];
+  /** 병력별 운동 상태 (죽은 병력의 것은 저절로 사라지도록 WeakMap) */
+  private motion = new WeakMap<Unit, Motion>();
+  /** 이번 틱 units[i] 의 운동 상태 (WeakMap 조회를 틱마다 한 번으로 줄인다) */
+  private mo: Motion[] = [];
+  /** 이번 틱 units[i] 의 사격 자격: 틱을 살아서 시작했는가 (동시 판정, combat 참고) */
+  private armed = new Uint8Array(0);
+  private readonly pack: PackGrid;
+  /** 이번 틱 steer 가 쓰는 cos(turnRate × dt) */
+  private straightCos = 1;
 
   constructor(init: WorldInit) {
     this.width = init.width;
     this.height = init.height;
     this.rng = new Rng(init.seed);
     this.grid = new SpatialGrid(init.width, init.height, 32);
+    // 칸 = 겹침 반경 (이웃 3×3 칸이면 충분한 가장 작은 칸: 촘촘한 궤도 · 대형에서 살펴볼 쌍이 가장 적다)
+    this.pack = new PackGrid(init.width, init.height, Math.max(2, CONFIG.formation.separation));
 
     const n = init.factionCount + 1;
     this.factions = Array.from({ length: n }, (_, id) => ({
@@ -184,6 +241,7 @@ export class World {
   private register(u: Unit, countAsProduced: boolean): Unit {
     this.units.push(u);
     this.unitById.set(u.id, u);
+    this.motion.set(u, newMotion(u));
     if (countAsProduced) this.factions[u.faction].stats.produced++;
     return u;
   }
@@ -191,10 +249,10 @@ export class World {
   step(dt = 1 / CONFIG.tickRate): void {
     if (this.winner !== null) return;
 
-    for (const cmd of this.pending) applyCommand(this, cmd);
+    for (const cmd of this.pending) for (const group of applyCommand(this, cmd)) this.formGroup(group);
     this.pending.length = 0;
 
-    for (const u of this.units) this.moveUnit(u, dt);
+    this.moveUnits(dt);
     this.refreshCounts();
     this.grid.rebuild(this.units);
     this.combat(dt);
@@ -211,40 +269,273 @@ export class World {
 
   // ───────────────────────────── 이동 ─────────────────────────────
 
-  private moveUnit(u: Unit, dt: number): void {
-    u.px = u.x;
-    u.py = u.y;
-    let gx: number, gy: number;
-    if (u.state === 'orbit') {
-      const p = this.planets[u.planet];
-      // 소유자의 병력과 침입자는 서로 반대로 돈다 (CONFIG.intruderOrbitFactor). 소유는 매 틱 다시 보므로
-      // 점령 직후 새 주인의 병력과 고립된 옛 수비대도 바로 방향이 바뀐다
-      u.orbitAngle += CONFIG.orbitSpeed * dt * (p.owner === u.faction ? 1 : CONFIG.intruderOrbitFactor);
-      const r = p.radius + u.orbitAltitude;
-      gx = p.x + Math.cos(u.orbitAngle) * r;
-      gy = p.y + Math.sin(u.orbitAngle) * r;
-    } else {
-      gx = u.tx;
-      gy = u.ty;
+  private motionOf(u: Unit): Motion {
+    let m = this.motion.get(u);
+    if (!m) {
+      // register 를 거치지 않고 만든 병력 (없어야 하지만, 있어도 멈춘 상태에서 시작하면 그만이다)
+      m = newMotion(u);
+      this.motion.set(u, m);
     }
-    const step = CONFIG.unit.speed * dt;
-    const via = u.state === 'move' ? this.detour(u) : null;
-    if (via) {
-      const vx = via.x - u.x, vy = via.y - u.y;
-      const vd = Math.hypot(vx, vy) || 1;
-      u.x += (vx / vd) * Math.min(step, vd);
-      u.y += (vy / vd) * Math.min(step, vd);
-      return;
+    return m;
+  }
+
+  /** 한 명령으로 슬롯을 받은 무리를 묶는다. 첫 틱의 기준은 가장 먼 구성원의 (직선) 남은 거리 */
+  private formGroup(units: readonly Unit[]): void {
+    const g: MoveGroup = { lead: 0, next: 0, tick: this.tick };
+    for (const u of units) {
+      const dx = u.tx - u.x, dy = u.ty - u.y;
+      g.lead = Math.max(g.lead, this.paceDistance(u, Math.sqrt(dx * dx + dy * dy)));
+      this.motionOf(u).group = g;
     }
-    const dx = gx - u.x, dy = gy - u.y;
-    const d = Math.hypot(dx, dy);
-    if (d <= step) {
-      u.x = gx;
-      u.y = gy;
-      if (u.state === 'move') this.arrive(u);
+  }
+
+  /**
+   * 보폭을 맞출 때 재는 남은 거리. 0 이하 = 맞추지 않는다 (최고 속도로 슬롯까지).
+   *  - 아군 행성 합류는 슬롯이 아니라 대기권 경계까지: 수비대로 세는 건 대기권에 들어선 순간부터이고, 안쪽 슬롯까지 남은
+   *    길은 슬롯이 행성 어느 쪽이냐에 따라 제각각이라 그것까지 맞추면 앞줄이 대기권 밖에서 공연히 기다린다.
+   *  - 돌파(남의 행성으로 강하)는 맞추지 않고 저마다 최고 속도로 들이친다. 다 같이 한순간에 들이치게 하면 강하 병력이
+   *    처음부터 방어막 비율(공격측 / (공격측 + 수비측))을 다 받아 두꺼운 수비대도 뚫린다
+   *    (헤드리스 측정: 100 대 70 돌파 성공 2/10 → 10/10, 60 대 30 돌파 손실 23 → 10기) — '두꺼우면 포위 후 돌파' 라는
+   *    핵심 선택이 사라진다. 돌파 슬롯이 이미 진입 방향으로 뭉친 고리라 무리는 그것만으로 한 덩어리로 들어간다.
+   */
+  private paceDistance(u: Unit, remaining: number): number {
+    if (u.planet < 0) return remaining;
+    const p = this.planets[u.planet];
+    if (p.owner !== u.faction) return 0;
+    const dx = u.x - p.x, dy = u.y - p.y;
+    return Math.sqrt(dx * dx + dy * dy) - p.atmosphereRadius;
+  }
+
+  /**
+   * 이동 = 목표 정하기 → 겹친 자리 풀기 → 조향 · 적분. 세 단계 모두 units 배열 순서로 돌아 결정론적이다.
+   * 겹침은 모든 병력의 목표를 정한 뒤 한꺼번에 푼다 (앞 병력이 움직인 결과가 뒤 병력의 판단에 섞이지 않게).
+   */
+  private moveUnits(dt: number): void {
+    const units = this.units;
+    const n = units.length;
+    const mo = this.mo;
+    mo.length = n;
+    // 최고 속도에서 한 틱에 꺾을 수 있는 각도의 cos (더 느리면 더 크게 꺾을 수 있으므로 이 안이면 늘 통과)
+    this.straightCos = Math.cos(CONFIG.unit.turnRate * dt);
+    for (let i = 0; i < n; i++) {
+      const u = units[i];
+      u.px = u.x;
+      u.py = u.y;
+      const m = this.motionOf(u);
+      mo[i] = m;
+      if (u.state === 'orbit') {
+        const p = this.planets[u.planet];
+        u.orbitAngle += this.orbitRate(u, p) * dt;
+        this.orbitGoal(u, m, p);
+      } else {
+        m.gx = u.tx;
+        m.gy = u.ty;
+        m.gvx = 0;
+        m.gvy = 0;
+      }
+    }
+    if (this.tick % SEPARATE_EVERY === 0) this.separate(dt * SEPARATE_EVERY);
+    for (let i = 0; i < n; i++) this.steer(units[i], mo[i], dt);
+  }
+
+  /**
+   * 궤도 각속도(rad/s). 소유자의 병력과 침입자는 서로 반대로 돈다 (CONFIG.intruderOrbitFactor).
+   * 소유는 매 틱 다시 보므로 점령 직후 새 주인의 병력과 고립된 옛 수비대도 바로 방향이 바뀐다
+   */
+  private orbitRate(u: Unit, p: Planet): number {
+    return CONFIG.orbitSpeed * (p.owner === u.faction ? 1 : CONFIG.intruderOrbitFactor);
+  }
+
+  /** 궤도 목표 = 지금 각도 · 고도의 점, 목표 속도 = 그 점의 접선 속도 (미리 따라 돌아서 궤도를 매끄럽게 탄다) */
+  private orbitGoal(u: Unit, m: Motion, p: Planet): void {
+    const w = this.orbitRate(u, p);
+    const r = p.radius + u.orbitAltitude;
+    const c = Math.cos(u.orbitAngle), s = Math.sin(u.orbitAngle);
+    m.gx = p.x + c * r;
+    m.gy = p.y + s * r;
+    m.gvx = -s * r * w;
+    m.gvy = c * r * w;
+  }
+
+  /**
+   * 같은 진영끼리 한 점에 겹쳐 선 병력의 자리를 조금씩 밀어낸다 (CONFIG.formation.separation).
+   * 속도가 아니라 자리(위치 고수 = tx/ty, 궤도 = 고도 · 각도)를 옮기므로 조향과 다투지 않고, 풀린 뒤엔 그대로 멈춘다.
+   * 같은 상태끼리만 민다(궤도는 같은 행성끼리): 이동 중인 무리는 2-opt 배정과 보폭 맞추기로 서로 엇갈리지 않고,
+   * 지나가는 무리가 세워 둔 대형을 흩뜨리거나 도는 궤도 병력이 멈춘 병력을 끌고 다니지 않게.
+   */
+  private separate(dt: number): void {
+    const units = this.units;
+    const mo = this.mo;
+    const pk = this.pack;
+    pk.build(units, mo);
+    if (!pk.push(CONFIG.formation.separation)) return;
+    const { pushX, pushY } = pk;
+
+    const step = CONFIG.formation.separationRate * dt;
+    for (let i = 0; i < units.length; i++) {
+      const sx = pushX[i] * step, sy = pushY[i] * step;
+      if (sx === 0 && sy === 0) continue;
+      const u = units[i], m = mo[i];
+      if (u.state === 'orbit') {
+        const p = this.planets[u.planet];
+        const c = Math.cos(u.orbitAngle), s = Math.sin(u.orbitAngle);
+        const r = p.radius + u.orbitAltitude;
+        // 대기권 안에 머물러야 수비대 · 강하 병력으로 센다
+        u.orbitAltitude = Math.min(CONFIG.atmosphere - 1, Math.max(MIN_ORBIT_ALT, u.orbitAltitude + sx * c + sy * s));
+        u.orbitAngle += (-sx * s + sy * c) / r;
+        this.orbitGoal(u, m, p);
+      } else {
+        const x = Math.min(this.width, Math.max(0, u.tx + sx));
+        const y = Math.min(this.height, Math.max(0, u.ty + sy));
+        // 대기권 경계를 넘겨 밀지 않는다: 포위 대형이 밀려 들어가 강하가 되거나 대기권 위에 세운 병력이 밀려나지 않게
+        if (this.planetAt(x, y) !== this.planetAt(u.tx, u.ty)) continue;
+        u.tx = m.gx = x;
+        u.ty = m.gy = y;
+      }
+    }
+  }
+
+  /**
+   * 원하는 속도를 정하고, 가속 · 선회 한계 안에서 따라간다.
+   *  - 이동: 슬롯(또는 우회 지점)으로. 무리의 보폭에 맞춘 속도, 슬롯 앞에서는 지나치지 않게 감속
+   *  - 궤도 · 위치 고수: 목표 지점의 속도 + 남은 거리 보정 (도착 감속과 같은 곡선)
+   * 함선은 한 틱에 정해진 각도만큼만 방향을 틀 수 있고(빠를수록 크게 돈다), 원하는 방향과 어긋난 만큼 감속한다
+   * (직각이면 절반, 정반대면 거의 멈추며 돈다): 반대 방향 명령은 짧은 U 턴이 되고, 슬롯 둘레를 빙빙 돌지 않는다.
+   */
+  private steer(u: Unit, m: Motion, dt: number): void {
+    const { speed, accel, turnRate } = CONFIG.unit;
+    let dx: number, dy: number;
+    let via: { x: number; y: number } | null = null;
+    if (u.state === 'move') {
+      via = this.detour(u);
+      const ax = via ? via.x : u.tx, ay = via ? via.y : u.ty;
+      const ex = ax - u.x, ey = ay - u.y;
+      const d = Math.sqrt(ex * ex + ey * ey);
+      let remaining = d;
+      if (via) {
+        const fx = u.tx - via.x, fy = u.ty - via.y;
+        remaining += Math.sqrt(fx * fx + fy * fy);
+      }
+      const ahead = this.paceDistance(u, remaining);
+      // 감속은 우회 지점이 아니라 슬롯까지 남은 길 기준: 슬롯 바로 앞까지 우회하던 함선도 제때 멈춘다
+      const want = Math.min(ahead > 0 ? speed * this.pace(m.group, ahead) : speed, arriveSpeed(remaining));
+      dx = d > 1e-9 ? (ex / d) * want : 0;
+      dy = d > 1e-9 ? (ey / d) * want : 0;
     } else {
-      u.x += (dx / d) * step;
-      u.y += (dy / d) * step;
+      const ex = m.gx - u.x, ey = m.gy - u.y;
+      const d = Math.sqrt(ex * ex + ey * ey);
+      const k = d > 1e-9 ? arriveSpeed(d) / d : 0;
+      dx = m.gvx + ex * k;
+      dy = m.gvy + ey * k;
+      const s = Math.sqrt(dx * dx + dy * dy);
+      if (s > speed) {
+        dx *= speed / s;
+        dy *= speed / s;
+      }
+    }
+
+    // 선회 · 가감속 한계
+    const want = Math.sqrt(dx * dx + dy * dy);
+    const cur = Math.sqrt(m.vx * m.vx + m.vy * m.vy);
+    let hx: number, hy: number, target: number;
+    if (want < 1e-9) {
+      // 멈추려는 중: 방향은 그대로 두고 감속만
+      hx = cur > 1e-9 ? m.vx / cur : 0;
+      hy = cur > 1e-9 ? m.vy / cur : 0;
+      target = 0;
+    } else {
+      const wx = dx / want, wy = dy / want;
+      if (cur < STOP_SPEED) {
+        hx = wx;
+        hy = wy;
+      } else {
+        const cx = m.vx / cur, cy = m.vy / cur;
+        const dot = cx * wx + cy * wy;
+        // 횡가속 한계(turnRate × speed): 느릴수록 빨리 돈다. 선회 반경 = 속도² / 한계 → 최고 속도 11px, 도착 직전엔 1px 미만
+        const maxTurn = Math.min(Math.PI, ((turnRate * speed) / cur) * dt);
+        // 대부분(궤도 · 직진)은 최고 속도에서도 한 틱에 꺾을 수 있는 각도 안이라 삼각함수 없이 바로 통과
+        if (dot >= this.straightCos || dot >= Math.cos(maxTurn)) {
+          hx = wx;
+          hy = wy;
+        } else {
+          // 원하는 방향 쪽으로 maxTurn 만큼만 돌린다
+          const sin = cx * wy - cy * wx >= 0 ? Math.sin(maxTurn) : -Math.sin(maxTurn);
+          const cos = Math.cos(maxTurn);
+          hx = cx * cos - cy * sin;
+          hy = cx * sin + cy * cos;
+        }
+      }
+      // 아직 어긋난 만큼 감속: (1 + cos) / 2 → 같은 방향 1, 직각 0.5, 정반대 0
+      target = (want * (1 + hx * wx + hy * wy)) / 2;
+    }
+    const dv = accel * dt;
+    const v = target > cur ? Math.min(target, cur + dv) : Math.max(target, cur - dv);
+    m.vx = hx * v;
+    m.vy = hy * v;
+    u.x += m.vx * dt;
+    u.y += m.vy * dt;
+    if (u.state !== 'orbit') this.keepOut(u, m);
+    u.x = Math.min(this.width, Math.max(0, u.x));
+    u.y = Math.min(this.height, Math.max(0, u.y));
+
+    if (u.state === 'move' && !via) {
+      const ex = u.tx - u.x, ey = u.ty - u.y;
+      if (ex * ex + ey * ey <= ARRIVE_EPS * ARRIVE_EPS) {
+        // 여기선 이미 6px/s 남짓(ARRIVE_GAIN × ARRIVE_EPS)이라 멈춰 세워도 튀지 않는다. 남겨 두면 슬롯을 0.3px 지나쳤다 돌아온다
+        u.x = u.tx;
+        u.y = u.ty;
+        m.vx = 0;
+        m.vy = 0;
+        this.arrive(u);
+      }
+    }
+  }
+
+  /**
+   * 무리의 보폭(최고 속도 대비). 가장 멀리 남은 병력이 도착하기 arriveWindow 초 전보다 일찍 닿을 병력만
+   * 남은 거리 비율로 늦춘다: 그 비율로 가면 무리가 출발 모양에서 슬롯 모양으로 고르게 바뀌며 함께 도착한다.
+   * 이미 뭉쳐 가는 무리(남은 거리 차가 여유 안)는 다 같이 최고 속도라, 자주 다시 내리는 추격 명령에도 굼뜨지 않다.
+   * 가장 긴 남은 거리는 직전 틱에 잰 것이라 그 사이 그 병력이 간 거리(최고 속도 1틱)만큼 빼서 쓴다.
+   */
+  private pace(g: MoveGroup | null, remaining: number): number {
+    if (!g) return 1;
+    if (g.tick !== this.tick) {
+      if (g.next > 0) g.lead = g.next;
+      g.next = 0;
+      g.tick = this.tick;
+    }
+    if (remaining > g.next) g.next = remaining;
+    const { speed } = CONFIG.unit;
+    const { arriveWindow, minPace } = CONFIG.formation;
+    const due = g.lead - speed / CONFIG.tickRate - speed * arriveWindow;
+    if (remaining >= due) return 1;
+    return Math.max(minPace, remaining / due);
+  }
+
+  /**
+   * 의도하지 않은 강하 막기: 이번 틱에 새로 들어선 남의 행성 대기권이 목적지를 품고 있지 않으면 경계 밖으로 되돌리고
+   * 안쪽으로 향하던 속도를 지운다 (경계를 따라 미끄러진다). 우회(detour)가 경로를 미리 돌리고, 이것은 선회 반경 때문에
+   * 우회 지점의 모서리를 안쪽으로 깎는 경우까지 막는다. 돌파 · 대기권 위에 그은 선은 목적지가 안쪽이라 그대로 들어간다.
+   */
+  private keepOut(u: Unit, m: Motion): void {
+    for (const p of this.planets) {
+      if (p.owner === u.faction || p.id === u.inPlanet) continue;
+      const ra = p.atmosphereRadius;
+      const dx = u.x - p.x, dy = u.y - p.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > ra * ra) continue;
+      const tx = u.tx - p.x, ty = u.ty - p.y;
+      if (tx * tx + ty * ty <= ra * ra) continue;
+      const d = Math.sqrt(d2);
+      if (d < 1e-9) continue;
+      const nx = dx / d, ny = dy / d;
+      u.x = p.x + nx * (ra + 0.01);
+      u.y = p.y + ny * (ra + 0.01);
+      const vn = m.vx * nx + m.vy * ny;
+      if (vn < 0) {
+        m.vx -= vn * nx;
+        m.vy -= vn * ny;
+      }
     }
   }
 
@@ -257,15 +548,20 @@ export class World {
     let bestT = Infinity;
     for (const p of this.planets) {
       if (p.owner === u.faction) continue;
-      const ra = p.atmosphereRadius + 3;
+      const atm = p.atmosphereRadius;
+      const ra = atm + 3;
       const ux = u.x - p.x, uy = u.y - p.y;
       const tx = u.tx - p.x, ty = u.ty - p.y;
-      if (ux * ux + uy * uy < p.atmosphereRadius ** 2 || tx * tx + ty * ty < ra * ra) continue;
+      const ru2 = ux * ux + uy * uy, rt2 = tx * tx + ty * ty;
+      if (ru2 < atm * atm || rt2 < atm * atm) continue;
+      // 보통은 경계에서 3px 여유를 두고 비켜 간다. 출발점이나 목적지가 이미 그 여유 띠 안이면(포위 슬롯이 경계 3px 밖)
+      // 대기권 자체만 피한다: 띠 안의 짧은 길까지 돌게 하면 함선이 슬롯 앞에서 우회 지점만 쫓으며 맴돈다
+      const clear = ru2 >= ra * ra && rt2 >= ra * ra ? ra : atm + 0.5;
       const sx = tx - ux, sy = ty - uy;
       const len2 = sx * sx + sy * sy || 1;
       const t = Math.max(0, Math.min(1, -(ux * sx + uy * sy) / len2));
       const cx = ux + sx * t, cy = uy + sy * t;
-      if (cx * cx + cy * cy < ra * ra && t < bestT) {
+      if (cx * cx + cy * cy < clear * clear && t < bestT) {
         bestT = t;
         best = p;
       }
@@ -293,11 +589,27 @@ export class World {
 
   // ───────────────────────────── 전투 ─────────────────────────────
 
+  /**
+   * 사격은 한 틱 안에서 동시에 일어난 것으로 본다.
+   *  - 이번 틱을 살아서 시작한 병력은 모두 쏜다. 같은 틱에 먼저 처리된 적에게 맞아 죽을 병력도 이미 쏜 것으로 친다
+   *    (예전에는 units 배열 앞쪽 = 먼저 만들어진 병력이 같은 틱의 맞대결에서 늘 먼저 쏘았다).
+   *  - 맞은 피해는 바로 체력에 쌓아(이번 틱에 이미 예약된 피해) 뒤에 쏘는 병력이 그것까지 셈한다:
+   *    이미 죽을 만큼 맞은 표적은 건너뛰고 그다음 가까운 적을 쏜다 (헛사격 없음). 시체 정리는 removeDead.
+   */
   private combat(dt: number): void {
     const { unit, isolation } = CONFIG;
-    for (const u of this.units) {
+    const units = this.units;
+    const n = units.length;
+    if (this.armed.length < n) this.armed = new Uint8Array(Math.max(n, this.armed.length * 2, 256));
+    const armed = this.armed;
+    for (let i = 0; i < n; i++) {
+      const u = units[i];
       if (u.isolated) u.hp -= isolation.hpLossPerSec * dt;
-      if (u.hp <= 0) continue;
+      armed[i] = u.hp > 0 ? 1 : 0;
+    }
+    for (let i = 0; i < n; i++) {
+      if (!armed[i]) continue;
+      const u = units[i];
       u.cooldown -= dt;
       if (u.cooldown > 0) continue;
 
@@ -325,7 +637,7 @@ export class World {
         }
       }
 
-      // 그 외: 사거리 안 가장 가까운 적 병력과 교전.
+      // 그 외: 사거리 안 가장 가까운 적 병력과 교전. hp > 0 = 이번 틱에 예약된 피해를 빼고도 살아 있는 적
       const target = this.grid.nearest(u.x, u.y, unit.range, (v) => v.faction !== u.faction && v.hp > 0);
       if (!target) {
         u.cooldown = 0.2;
@@ -455,5 +767,133 @@ export class World {
     }
     if (this.winRule) this.winner = this.winRule(this);
     else if (aliveCount <= 1) this.winner = last;
+  }
+}
+
+function newMotion(u: Unit): Motion {
+  return { vx: 0, vy: 0, group: null, gx: u.x, gy: u.y, gvx: 0, gvy: 0 };
+}
+
+/** 남은 거리 d 에서 지나치지 않고 멈출 수 있는 최고 속도 (가속 한계 안의 감속 곡선, 마지막 몇 px 는 거리에 비례) */
+function arriveSpeed(d: number): number {
+  const { speed, accel } = CONFIG.unit;
+  return Math.min(speed, Math.sqrt(2 * accel * ARRIVE_BRAKE * d), ARRIVE_GAIN * d);
+}
+
+/**
+ * 겹침 풀기용 촘촘한 격자. 칸 크기 ≥ 겹침 반경이라 주변 3×3 칸만 보면 된다.
+ * 칸마다 연결 리스트(head → next)로 담고 쓴 칸만 되돌려 놓아서, 틱마다 드는 비용이 칸 수가 아니라 병력 수에 비례한다
+ * (맵 전체 칸을 비우고 훑던 계수 정렬판은 1440기 행군에서 틱 시간의 28% 를 썼다). 쌍 검사에 쓰는 값은 typed array 에 모아 둔다.
+ * 리스트는 큰 번호부터 이어져 있어 i < j 인 쌍만 훑고 멈출 수 있고, 순서가 units 배열로 정해져 결정론적이다.
+ * 멈춘 병력(위치 고수 · 궤도)만 넣는다: 이동 중인 병력은 겹침 풀기 대상이 아니다.
+ */
+class PackGrid {
+  /** units[i] 의 자리를 밀어낼 방향 · 세기의 합 (push 가 채운다) */
+  pushX = new Float64Array(0);
+  pushY = new Float64Array(0);
+  private readonly cols: number;
+  private readonly rows: number;
+  private readonly size: number;
+  /** 칸마다 마지막(가장 큰 번호)으로 넣은 항목, 비었으면 -1 */
+  private readonly head: Int32Array;
+  /** 같은 칸의 다음(더 작은 번호) 항목 */
+  private next = new Int32Array(0);
+  /** units[i] 가 든 칸 (-1 = 넣지 않음) */
+  private cell = new Int32Array(0);
+  /** 서로 밀어낼 수 있는 사이면 같은 값: 같은 진영 · 같은 상태 (궤도는 같은 행성까지) */
+  private kind = new Int32Array(0);
+  private id = new Int32Array(0);
+  private gx = new Float64Array(0);
+  private gy = new Float64Array(0);
+  private n = 0;
+
+  constructor(width: number, height: number, size: number) {
+    this.size = size;
+    this.cols = Math.max(1, Math.ceil(width / size));
+    this.rows = Math.max(1, Math.ceil(height / size));
+    this.head = new Int32Array(this.cols * this.rows).fill(-1);
+  }
+
+  build(units: readonly Unit[], mo: readonly Motion[]): void {
+    const { head, cols, rows, size } = this;
+    // 지난 틱에 쓴 칸만 비운다
+    for (let i = 0; i < this.n; i++) if (this.cell[i] >= 0) head[this.cell[i]] = -1;
+    const n = units.length;
+    if (this.cell.length < n) {
+      const cap = Math.max(n, this.cell.length * 2, 256);
+      this.next = new Int32Array(cap);
+      this.cell = new Int32Array(cap);
+      this.kind = new Int32Array(cap);
+      this.id = new Int32Array(cap);
+      this.gx = new Float64Array(cap);
+      this.gy = new Float64Array(cap);
+      this.pushX = new Float64Array(cap);
+      this.pushY = new Float64Array(cap);
+    }
+    const { next, cell } = this;
+    for (let i = 0; i < n; i++) {
+      const u = units[i];
+      if (u.state === 'move') {
+        cell[i] = -1;
+        continue;
+      }
+      const m = mo[i];
+      const cx = Math.min(cols - 1, Math.max(0, Math.floor(m.gx / size)));
+      const cy = Math.min(rows - 1, Math.max(0, Math.floor(m.gy / size)));
+      const c = cy * cols + cx;
+      cell[i] = c;
+      next[i] = head[c];
+      head[c] = i;
+      // 위치 고수 = 진영만, 궤도 = 진영 + 행성(1 부터) 으로 구분
+      this.kind[i] = (u.faction << 16) | (u.state === 'orbit' ? u.planet + 1 : 0);
+      this.id[i] = u.id;
+      this.gx[i] = m.gx;
+      this.gy[i] = m.gy;
+    }
+    this.n = n;
+  }
+
+  /** 반경 R 안으로 겹친 같은 무리끼리의 밀어낼 양을 pushX/Y 에 모은다. 겹친 쌍이 하나도 없으면 false */
+  push(R: number): boolean {
+    const { cols, rows, head, next, cell, kind, gx, gy, pushX, pushY } = this;
+    pushX.fill(0, 0, this.n);
+    pushY.fill(0, 0, this.n);
+    let any = false;
+    for (let i = 0; i < this.n; i++) {
+      const c = cell[i];
+      if (c < 0) continue;
+      const cx = c % cols, cy = (c - cx) / cols;
+      const gx0 = Math.max(0, cx - 1), gx1 = Math.min(cols - 1, cx + 1);
+      const gy0 = Math.max(0, cy - 1), gy1 = Math.min(rows - 1, cy + 1);
+      for (let ry = gy0; ry <= gy1; ry++) {
+        for (let rx = gx0; rx <= gx1; rx++) {
+          // 큰 번호부터 이어져 있으니 i 이하가 나오면 이 칸은 끝
+          for (let j = head[ry * cols + rx]; j > i; j = next[j]) {
+            if (kind[j] !== kind[i]) continue;
+            let dx = gx[i] - gx[j], dy = gy[i] - gy[j];
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= R * R) continue;
+            const d = Math.sqrt(d2);
+            if (d < 1e-6) {
+              // 정확히 겹친 쌍: id 로 정한 방향으로 갈라선다 (결정론)
+              const ang = ((this.id[i] * 0.618034 + this.id[j] * 0.381966) % 1) * Math.PI * 2;
+              dx = Math.cos(ang);
+              dy = Math.sin(ang);
+            } else {
+              dx /= d;
+              dy /= d;
+            }
+            // 많이 겹칠수록 세게 (완전히 겹치면 1)
+            const k = (R - d) / R;
+            pushX[i] += dx * k;
+            pushY[i] += dy * k;
+            pushX[j] -= dx * k;
+            pushY[j] -= dy * k;
+            any = true;
+          }
+        }
+      }
+    }
+    return any;
   }
 }

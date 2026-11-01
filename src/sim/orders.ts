@@ -7,14 +7,17 @@ interface Slot {
   y: number;
 }
 
-/** 명령을 유닛별 목표 지점(슬롯)으로 풀어서 배정한다. */
-export function applyCommand(world: World, cmd: Command): void {
+/**
+ * 명령을 유닛별 목표 지점(슬롯)으로 풀어서 배정한다.
+ * 반환값: 함께 움직일 무리들 (보통 하나, 귀환은 돌아갈 행성마다 하나). World 가 무리마다 보폭을 맞춘다
+ */
+export function applyCommand(world: World, cmd: Command): Unit[][] {
   const units: Unit[] = [];
   for (const id of cmd.unitIds) {
     const u = world.getUnit(id);
     if (u && u.faction === cmd.faction) units.push(u);
   }
-  if (units.length === 0) return;
+  if (units.length === 0) return [];
 
   const o = cmd.order;
   switch (o.kind) {
@@ -28,25 +31,25 @@ export function applyCommand(world: World, cmd: Command): void {
         const half = CONFIG.formation.spreadHalfWidth;
         lineOrder(units, t.x - dy * half, t.y + dx * half, t.x + dy * half, t.y - dx * half, world);
       }
-      return;
+      return [units];
     }
     case 'line': {
       const a = clampToWorld(world, o.x1, o.y1);
       const b = clampToWorld(world, o.x2, o.y2);
       lineOrder(units, a.x, a.y, b.x, b.y, world);
-      return;
+      return [units];
     }
     case 'planet': {
       const p = world.planets[o.planetId];
-      if (!p) return;
+      if (!p) return [];
       if (p.owner === cmd.faction) joinPlanet(units, p);
       else if (o.formation === 'cluster') assaultPlanet(units, p);
       else surroundPlanet(units, p, world);
-      return;
+      return [units];
     }
     case 'return': {
       const friendly = world.planets.filter((p) => p.owner === cmd.faction);
-      if (friendly.length === 0) return;
+      if (friendly.length === 0) return [];
       const groups = new Map<Planet, Unit[]>();
       for (const u of units) {
         let best = friendly[0];
@@ -63,7 +66,7 @@ export function applyCommand(world: World, cmd: Command): void {
         groups.set(best, g);
       }
       for (const [p, g] of groups) joinPlanet(g, p);
-      return;
+      return [...groups.values()];
     }
   }
 }
@@ -163,11 +166,78 @@ function lineOrder(units: Unit[], x1: number, y1: number, x2: number, y2: number
   assignByAxis(units, slots, ax, ay, -1);
 }
 
-/** 유닛과 슬롯을 같은 축에 투영해 정렬한 뒤 짝지어, 이동 경로가 덜 엇갈리게 한다 */
+/** 유닛과 슬롯을 같은 축에 투영한 순서로 처음 짝지은 뒤 다듬는다 (assign) */
 function assignByAxis(units: Unit[], slots: Slot[], ax: number, ay: number, planetId: number): void {
-  const us = [...units].sort((a, b) => a.x * ax + a.y * ay - (b.x * ax + b.y * ay));
-  const ss = [...slots].sort((a, b) => a.x * ax + a.y * ay - (b.x * ax + b.y * ay));
-  us.forEach((u, i) => sendTo(u, ss[i], planetId));
+  assign(units, slots, (x, y) => x * ax + y * ay, planetId);
+}
+
+/**
+ * 처음 정렬 순서에서 앞뒤 이만큼의 이웃끼리만 맞바꿔 본다: 명령 한 번의 계산량을 n × 창 크기로 묶는다.
+ * 모든 쌍을 보는 것과 엇갈림 수가 거의 같고(흩어진 150기 0쌍, 300기 0~4쌍), 300기 명령이 1ms 안팎 (모든 쌍은 3ms)
+ */
+const TWO_OPT_WINDOW = 32;
+/** 맞바꿀 쌍이 남아 있어도 이만큼 훑으면 멈춘다 */
+const TWO_OPT_PASSES = 10;
+
+/**
+ * 유닛 ↔ 슬롯 짝짓기. key(투영 축 또는 고리 각도) 순서로 처음 짝지은 다음(O(n log n)),
+ * 두 유닛의 슬롯을 맞바꿔 두 경로 길이의 합이 줄면 바꾸는 2-opt 로 다듬는다.
+ * 유클리드 거리의 합에서는 교차하는 두 경로를 맞바꾸면 반드시 짧아지므로(삼각부등식), 창 안에서 더 바꿀 쌍이
+ * 없으면 그 안에 엇갈리는 경로도 없다: 무리가 엉키지 않고 그대로 펴지며 대형이 된다 (예전 축 정렬만으로는 흩어진
+ * 300기의 경로가 1200~7400쌍 엇갈렸다). 정렬 · 훑는 순서 모두 입력 순서로 정해져 결정론적이다.
+ */
+function assign(units: Unit[], slots: Slot[], key: (x: number, y: number) => number, planetId: number): void {
+  const us = sortByKey(units, key);
+  const ss = sortByKey(slots, key);
+  const n = us.length;
+  const ux = new Float64Array(n), uy = new Float64Array(n);
+  const sx = new Float64Array(n), sy = new Float64Array(n);
+  const cost = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    ux[i] = us[i].x;
+    uy[i] = us[i].y;
+    sx[i] = ss[i].x;
+    sy[i] = ss[i].y;
+    cost[i] = dist(ux[i], uy[i], sx[i], sy[i]);
+  }
+  for (let pass = 0; pass < TWO_OPT_PASSES; pass++) {
+    let swapped = false;
+    for (let i = 0; i < n - 1; i++) {
+      const end = Math.min(n, i + TWO_OPT_WINDOW + 1);
+      for (let j = i + 1; j < end; j++) {
+        const a = dist(ux[i], uy[i], sx[j], sy[j]);
+        const b = dist(ux[j], uy[j], sx[i], sy[i]);
+        // 아주 작은 이득은 무시: 부동소수 오차로 같은 쌍을 계속 맞바꾸지 않게
+        if (a + b < cost[i] + cost[j] - 1e-6) {
+          const tx = sx[i], ty = sy[i];
+          sx[i] = sx[j];
+          sy[i] = sy[j];
+          sx[j] = tx;
+          sy[j] = ty;
+          cost[i] = a;
+          cost[j] = b;
+          swapped = true;
+        }
+      }
+    }
+    if (!swapped) break;
+  }
+  for (let i = 0; i < n; i++) sendTo(us[i], { x: sx[i], y: sy[i] }, planetId);
+}
+
+/** key 순으로 정렬한 사본. key(고리 각도면 atan2)는 항목마다 한 번만 계산한다 (비교 함수 안에서 n log n 번 부르지 않게) */
+function sortByKey<T extends Slot>(items: readonly T[], key: (x: number, y: number) => number): T[] {
+  const k = items.map((s) => key(s.x, s.y));
+  return items
+    .map((_, i) => i)
+    .sort((a, b) => k[a] - k[b])
+    .map((i) => items[i]);
+}
+
+/** Math.hypot 대신 sqrt: 더 빠르고, IEEE 754 가 정확한 반올림을 보장해 어느 엔진에서나 같은 값이 나온다 */
+function dist(ax: number, ay: number, bx: number, by: number): number {
+  const dx = ax - bx, dy = ay - by;
+  return Math.sqrt(dx * dx + dy * dy);
 }
 
 function sendTo(u: Unit, s: Slot, planetId: number): void {
@@ -250,11 +320,9 @@ function ringSlots(
   return slots;
 }
 
+/** 행성 둘레 슬롯: 진입 방향(a0) 기준 각도 순서로 처음 짝지은 뒤 다듬는다 (assign) */
 function assignOnRing(units: Unit[], p: Planet, slots: Slot[], a0: number, planetId: number): void {
-  const key = (x: number, y: number) => angleDiff(Math.atan2(y - p.y, x - p.x), a0);
-  const us = [...units].sort((a, b) => key(a.x, a.y) - key(b.x, b.y));
-  const ss = [...slots].sort((a, b) => key(a.x, a.y) - key(b.x, b.y));
-  us.forEach((u, i) => sendTo(u, ss[i], planetId));
+  assign(units, slots, (x, y) => angleDiff(Math.atan2(y - p.y, x - p.x), a0), planetId);
 }
 
 function entryAngle(units: Unit[], p: Planet): number {
