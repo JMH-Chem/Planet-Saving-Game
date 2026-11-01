@@ -48,7 +48,13 @@ export class Match {
     });
   }
 
+  /** 플레이어의 탈락은 세계 전체의 최종 승자와 별개다. 자동 관전은 끝까지 진행한다. */
+  get finished(): boolean {
+    return this.world.winner !== null || (!this.settings.autoplay && !this.world.factions[PLAYER].alive);
+  }
+
   step(dt = 1 / CONFIG.tickRate): void {
+    if (this.finished) return;
     this.world.step(dt);
     this.waves?.update(this.world);
     for (const ai of this.ais) ai.update(this.world);

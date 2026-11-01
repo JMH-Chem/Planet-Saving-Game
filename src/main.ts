@@ -126,7 +126,7 @@ function startMatch(s: MatchSettings): void {
   if (waves) hud.toast(`첫 침공까지 ${clock(waves.schedule[0].spawnAt)} · 주변 행성을 먼저 확보하세요`, g.world.factions[waves.faction].color, 7000);
 }
 
-function showResult(winner: number): void {
+function showResult(winner: number | null): void {
   if (!game) return;
   const w = game.world;
   const me = w.factions[PLAYER];

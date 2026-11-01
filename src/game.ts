@@ -10,7 +10,8 @@ export interface GameHooks {
   onEvents?: (events: readonly GameEvent[]) => void;
   /** 선택 수가 바뀜. byUser = 플레이어 입력으로 고름 (false = 고른 병력이 죽어서 줄어듦: 선택음을 내지 않는다) */
   onSelectionChange?: (count: number, byUser: boolean) => void;
-  onEnd?: (winner: number) => void;
+  /** 다자전에서 플레이어가 먼저 탈락했으면 세계의 최종 승자는 아직 null 이다. */
+  onEnd?: (winner: number | null) => void;
   /** 매 프레임 렌더 직후 (미니맵 · 알림 갱신용, 실제 경과 초) */
   onFrame?: (dt: number) => void;
 }
@@ -188,7 +189,7 @@ export class Game {
     this.renderer.render(this.world, this.camera, this.selection, this.paused ? 1 : this.acc / DT, this.overlay, realDt);
     this.hooks.onFrame?.(realDt);
 
-    if (!this.spectator && !this.ended && this.world.winner !== null) {
+    if (!this.spectator && !this.ended && this.match.finished) {
       this.ended = true;
       this.hooks.onEnd?.(this.world.winner);
     }

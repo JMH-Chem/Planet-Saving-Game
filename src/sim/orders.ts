@@ -22,7 +22,7 @@ export function applyCommand(world: World, cmd: Command): void {
       const t = clampToWorld(world, o.x, o.y);
       if (o.formation === 'cluster') {
         const { px, py } = travelAxes(units, t.x, t.y);
-        assignByAxis(units, clusterSlots(units.length, t.x, t.y), px, py, -1);
+        assignByAxis(units, clusterInWorld(world, units.length, t.x, t.y), px, py, -1);
       } else {
         const { dx, dy } = travelAxes(units, t.x, t.y);
         const half = CONFIG.formation.spreadHalfWidth;
@@ -110,6 +110,20 @@ export function clusterSlots(n: number, cx: number, cy: number): Slot[] {
   return slots;
 }
 
+/** 대형 전체를 안쪽으로 옮겨 가장자리에서도 병력 간격을 보존한다. */
+function clusterInWorld(world: World, n: number, cx: number, cy: number): Slot[] {
+  const slots = clusterSlots(n, cx, cy);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const s of slots) {
+    minX = Math.min(minX, s.x); minY = Math.min(minY, s.y);
+    maxX = Math.max(maxX, s.x); maxY = Math.max(maxY, s.y);
+  }
+  const dx = minX < 0 ? -minX : maxX > world.width ? world.width - maxX : 0;
+  const dy = minY < 0 ? -minY : maxY > world.height ? world.height - maxY : 0;
+  // 맵 자체보다 큰 대형에도 좌표 범위는 보장한다.
+  return slots.map((s) => clampToWorld(world, s.x + dx, s.y + dy));
+}
+
 /**
  * 선분 A-B 를 따라 횡대 배치. 인원이 적으면 선 전체에 고르게 펼치고,
  * 한 줄에 다 못 서면 부대가 있던 쪽(뒤)으로 줄을 늘린다.
@@ -121,7 +135,7 @@ function lineOrder(units: Unit[], x1: number, y1: number, x2: number, y2: number
   const len = Math.hypot(ax, ay);
   if (len < lineSpacing) {
     const { px, py } = travelAxes(units, x1, y1);
-    assignByAxis(units, clusterSlots(n, x1, y1), px, py, -1);
+    assignByAxis(units, clusterInWorld(world, n, x1, y1), px, py, -1);
     return;
   }
   ax /= len;
