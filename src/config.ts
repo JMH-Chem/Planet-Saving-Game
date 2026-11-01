@@ -171,8 +171,10 @@ export const AI_PROFILES: Record<Difficulty, AIProfile> = {
     projectThreats: false, threatHorizon: 0, retreatEarly: false,
     opportunism: false, snipes: false, synchronize: false, feints: false,
   },
+  // 보통의 안전 배율: 지금 이동(조향 · 보폭 맞추기)과 AI 이동 모형 위에서 꼼꼼한 스크립트 플레이어를 상대로 한 AI 승률
+  // (시드 1~40) 1.3 → 47.5%, 1.2 → 32.5% (목표 25~45%). 넉넉히 보낼수록 오히려 강하다 (1.4 → 55%)
   normal: {
-    thinkInterval: 3.0, attackMargin: 1.3, usesStaging: true, reserveRatio: 0.12,
+    thinkInterval: 3.0, attackMargin: 1.2, usesStaging: true, reserveRatio: 0.12,
     launchesPerThink: 1, maxOps: 1, enemyPressure: 1, reinforceWeight: 0.5,
     homeGuard: 0.25, estimateBias: 1, estimateNoise: 0.15,
     projectThreats: false, threatHorizon: 0, retreatEarly: true,
