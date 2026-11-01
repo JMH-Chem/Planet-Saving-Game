@@ -260,5 +260,5 @@ export const DEFENSE = {
   raidMin: 6,
 
   /** 자동 진행(밸런스 측정 · 관전)에서 플레이어를 조종하는 AI 성향. 난이도는 침공 규모만 바꾼다 */
-  autoplayProfile: 'normal' as Difficulty,
+  autoplayProfile: 'hard' as Difficulty,
 } as const;
