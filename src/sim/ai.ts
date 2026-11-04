@@ -881,12 +881,13 @@ export class AIController {
       const src = near.filter((s) => this.spare(pool, s) > 0).sort((a, b) => travel(a, decoy) - travel(b, decoy));
       if (src.reduce((s, p) => s + this.spare(pool, p), 0) >= fakeSize) {
         const fake: Unit[] = [];
-        let fakeEta = 0;
         for (const s of src) {
           if (fake.length >= fakeSize) break;
           fake.push(...this.take(pool, s, Math.min(this.spare(pool, s), fakeSize - fake.length)));
-          fakeEta = Math.max(fakeEta, travel(s, decoy));
         }
+        // 궤도 위 실제 출발 위치를 쓴다. 산개 무리는 뒤쪽 병력의 보폭에 맞춰 가므로
+        // 행성 중심 간 거리만 쓰면 견제의 도착을 실제보다 빨리 잡는다.
+        const fakeEta = Math.max(...fake.map((u) => Math.max(0, dist(u, decoy) - decoy.atmosphereRadius) / CONFIG.unit.speed));
         // 포위로 대기권 밖에 서서 오래 버티며 시선을 끈다. 본대는 그보다 FEINT_LEAD 초 늦게 닿는다
         this.order(world, fake, { kind: 'planet', planetId: decoy.id, formation: 'spread' });
         const feint = this.newOp('feint', decoy.id, fake, now, 'stage');
@@ -898,7 +899,10 @@ export class AIController {
     }
 
     for (const g of groups) {
-      const delay = prof.synchronize || op.partner ? arrive - g.eta : 0;
+      // 돌파 무리는 보폭을 맞추지 않아 앞쪽 병력이 먼저 닿는다. 견제와의 간격은
+      // 본대 선두 기준으로 확보해야 먼저 도착한 본대가 견제보다 앞서 싸우지 않는다.
+      const eta = op.partner ? Math.min(...g.units.map((u) => Math.max(0, dist(u, t) - t.atmosphereRadius) / CONFIG.unit.speed)) : g.eta;
+      const delay = prof.synchronize || op.partner ? arrive - eta : 0;
       if (delay < prof.thinkInterval) this.order(world, g.units, { kind: 'planet', planetId: t.id, formation });
       else op.pending.push({ ids: g.units.map((u) => u.id), at: now + delay });
     }
@@ -960,13 +964,18 @@ export class AIController {
 
       if (elapsed > ASSAULT_TIMEOUT) return end(op, true);
       if (this.profile.retreatEarly) {
-        // 대부분 닿은 뒤부터: 지금 그대로 계속 돌파하면 먹을 수 있나
+        // 수비대 사거리까지 접근하면 재평가한다. 대다수가 대기권 안에 들어갈 때까지
+        // 기다리면 증원이 온 것을 보고도 강하해, 선회·가속하며 빠져나올 병력까지 잃는다.
         if (waiting === 0 && elapsed > 3) {
-          let inside = 0;
-          for (const id of op.units) if (world.getUnit(id)!.inPlanet === t.id) inside++;
-          if (inside >= alive * 0.6) {
+          let inside = 0, approaching = 0;
+          for (const id of op.units) {
+            const u = world.getUnit(id)!;
+            if (u.inPlanet === t.id) inside++;
+            if (dist(u, t) <= t.atmosphereRadius + CONFIG.unit.range) approaching++;
+          }
+          if (approaching >= alive * 0.6) {
             const defenders = this.hostilesNear(world, t, 0, true);
-            const est = estimateBattle({ ...planetBattle(t, alive * RETREAT_SLACK, defenders, 0), engaged: true }, 'dive');
+            const est = estimateBattle({ ...planetBattle(t, alive * RETREAT_SLACK, defenders, 0), engaged: inside >= alive * 0.6 }, 'dive');
             op.doubt = !est.success && t.defense > t.maxDefense * 0.1 ? op.doubt + 1 : 0;
             if (op.doubt >= DOUBT_LIMIT) return end(op, true);
           }
