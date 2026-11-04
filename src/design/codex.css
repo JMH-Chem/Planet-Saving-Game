@@ -43,7 +43,7 @@ html[data-design='codex'] button {
   transition: background-color 140ms, border-color 140ms;
 }
 
-html[data-design='codex'] :is(button, input, a):focus-visible {
+html[data-design='codex'] :is(button, input, a, summary):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
@@ -57,7 +57,7 @@ html[data-design='codex'] #menu {
   flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
-  gap: 32px;
+  gap: 24px;
   padding: max(28px, var(--safe-top)) max(32px, var(--safe-right)) max(28px, var(--safe-bottom)) max(32px, var(--safe-left));
   background: radial-gradient(ellipse at 15% 20%, rgba(39, 73, 72, 0.42), transparent 65%), rgba(6, 15, 21, 0.94);
 }
@@ -105,6 +105,13 @@ html[data-design='codex'] .design-switch {
   padding: 3px;
 }
 
+html[data-design='codex'] .design-switch a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+}
+
 html[data-design='codex'] .design-switch a[aria-current] {
   background: #d5e8a4;
   color: #182524;
@@ -134,6 +141,7 @@ html[data-design='codex'] .cx-eyebrow {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.12em;
+  word-break: keep-all;
 }
 
 html[data-design='codex'] .cx-title h1 {
@@ -160,19 +168,34 @@ html[data-design='codex'] .cx-tactics {
 html[data-design='codex'] .cx-tactics svg {
   display: block;
   width: 100%;
-  max-height: 285px;
+  max-height: 240px;
 }
 
 html[data-design='codex'] .cx-tactics figcaption {
-  display: flex;
-  justify-content: center;
-  gap: 30px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 8px 12px 0;
   color: #a0b1b5;
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+html[data-design='codex'] .cx-tactics figcaption span {
+  padding: 12px 14px;
+  border-left: 2px solid #d5e8a4;
+  background: #d5e8a408;
+  word-break: keep-all;
+}
+
+html[data-design='codex'] .cx-tactics figcaption span + span {
+  border-color: #8dccde;
+  background: #8dccde08;
 }
 
 html[data-design='codex'] .cx-tactics b {
-  margin-left: 6px;
+  display: block;
+  margin-bottom: 3px;
   color: #d5e8a4;
   font-weight: 600;
 }
@@ -253,6 +276,7 @@ html[data-design='codex'] .seg button.on {
   background: rgba(213, 232, 164, 0.1);
   border-color: #b6ca8c;
   color: #e9efcf;
+  box-shadow: inset 0 -2px #b6ca8c;
 }
 
 html[data-design='codex'] .seg[data-name='mode'] button {
@@ -267,14 +291,14 @@ html[data-design='codex'] .seg[data-name='mode'] button {
 }
 
 html[data-design='codex'] .seg small {
-  font-size: 10px;
+  font-size: 11px;
   color: #a3b4b1;
   font-weight: 400;
 }
 
 html[data-design='codex'] .mode-desc {
   min-height: 34px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -288,6 +312,43 @@ html[data-design='codex'] .seed input {
 
 html[data-design='codex'] .seed button {
   border: 1px solid var(--panel-border);
+  width: 44px;
+  height: 44px;
+}
+
+html[data-design='codex'] .cx-map-settings {
+  border-block: 1px solid var(--panel-border);
+}
+
+html[data-design='codex'] .cx-map-settings summary {
+  min-height: 44px;
+  padding: 13px 0;
+  color: #c3cece;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+html[data-design='codex'] .cx-map-settings summary span {
+  float: right;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+html[data-design='codex'] .cx-map-settings .field {
+  padding-bottom: 14px;
+}
+
+html[data-design='codex'] .cx-seed-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: keep-all;
+}
+
+html[data-design='codex'] .cx-launch-actions {
+  display: grid;
+  gap: 10px;
 }
 
 html[data-design='codex'] .primary {
@@ -314,14 +375,13 @@ html[data-design='codex'] .cx-settings .ghost {
   height: 44px;
   min-height: 44px;
   border: 0;
-  margin-top: -7px;
 }
 
 html[data-design='codex'] .cx-launch-note {
-  margin: -8px 0 0;
+  margin: 0;
   text-align: center;
   color: #8da4a7;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 /* 전장: 진영 색은 원본과 공유하고 프레임·숫자·선택 상태의 위계만 정리한다. */
@@ -372,6 +432,7 @@ html[data-design='codex'] .command-bar {
 }
 
 html[data-design='codex'] .command-bar button {
+  min-width: 44px;
   min-height: 48px;
   font-size: 12px;
   border: 1px solid transparent;
@@ -410,28 +471,58 @@ html[data-design='codex'] #help .panel {
   background: #10212bf5;
 }
 
+html[data-design='codex'] #help .panel {
+  gap: 20px;
+}
+
+html[data-design='codex'] #help h2 {
+  font-size: 19px;
+}
+
+html[data-design='codex'] #help .rules {
+  line-height: 1.8;
+  gap: 10px;
+}
+
+html[data-design='codex'] #help .controls :is(th, td) {
+  padding: 10px 8px;
+  line-height: 1.6;
+}
+
+html[data-design='codex'] #btn-help-close {
+  position: sticky;
+  bottom: 0;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 8px #10212b;
+}
+
 html[data-design='codex'] :is(#result, #confirm) h1 {
   background: none;
   color: #e6edcf;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   html[data-design='codex'] #menu {
-    padding: max(16px, var(--safe-top)) max(16px, var(--safe-right)) max(16px, var(--safe-bottom)) max(16px, var(--safe-left));
-    gap: 20px;
+    padding: max(12px, var(--safe-top)) max(16px, var(--safe-right)) max(12px, var(--safe-bottom)) max(16px, var(--safe-left));
+    gap: 12px;
   }
   html[data-design='codex'] .cx-header { gap: 8px; }
   html[data-design='codex'] .cx-wordmark { font-size: 9px; letter-spacing: 0.05em; gap: 7px; }
   html[data-design='codex'] .design-switch { font-size: 10px; }
   html[data-design='codex'] .design-switch a { padding: 8px; }
   html[data-design='codex'] .cx-stage { grid-template-columns: minmax(0, 1fr); max-width: 480px; border-radius: 12px; }
-  html[data-design='codex'] .cx-brief { padding: 24px; }
-  html[data-design='codex'] .cx-eyebrow { margin-bottom: 9px; }
-  html[data-design='codex'] .cx-title h1 { font-size: 38px; }
-  html[data-design='codex'] .cx-manifest { margin-top: 10px; font-size: 12px; }
-  html[data-design='codex'] .cx-tactics,
+  html[data-design='codex'] .cx-brief { padding: 20px; }
+  html[data-design='codex'] .cx-eyebrow { margin-bottom: 8px; }
+  html[data-design='codex'] .cx-title h1 { font-size: 34px; }
+  html[data-design='codex'] .cx-manifest { display: none; }
+  html[data-design='codex'] .cx-tactics { margin: 12px 0 0; padding: 0; }
+  html[data-design='codex'] .cx-tactics svg,
   html[data-design='codex'] .cx-principles { display: none; }
-  html[data-design='codex'] #menu .cx-settings { padding: 24px; gap: 14px; border-left: 0; border-top: 1px solid var(--panel-border); border-radius: 0 0 12px 12px; }
+  html[data-design='codex'] .cx-tactics figcaption { margin: 0; gap: 8px; font-size: 11px; }
+  html[data-design='codex'] .cx-tactics figcaption span { padding: 6px 8px; }
+  html[data-design='codex'] #menu .cx-settings { padding: 20px; gap: 14px; border-left: 0; border-top: 1px solid var(--panel-border); border-radius: 0 0 12px 12px; }
+  html[data-design='codex'] .seg[data-name='mode'] button { height: 60px; gap: 5px; padding: 10px; }
+  html[data-design='codex'] .mode-desc { min-height: 0; }
   html[data-design='codex'] .cx-card-heading { display: none; }
   html[data-design='codex'] .chip { padding: 5px 7px; gap: 5px; }
   html[data-design='codex'] .chip b { font-size: 15px; }
@@ -439,21 +530,52 @@ html[data-design='codex'] :is(#result, #confirm) h1 {
   html[data-design='codex'] .command-bar { padding: 5px; }
   html[data-design='codex'] .command-bar button { font-size: 11px; padding: 0 5px; }
   html[data-design='codex'] .sel-count { padding-right: 6px; }
+  html[data-design='codex'] #help .panel { padding: 22px 18px; }
+  html[data-design='codex'] #help .controls td:first-child { white-space: normal; min-width: 4em; }
 }
 
 @media (max-width: 360px) {
   html[data-design='codex'] .cx-wordmark { font-size: 0; }
-  html[data-design='codex'] .cx-brief { padding: 20px; }
-  html[data-design='codex'] #menu .cx-settings { padding: 20px; }
-  html[data-design='codex'] .command-bar { gap: 1px; }
-  html[data-design='codex'] .command-bar button { padding: 0 2px; font-size: 10px; }
+  html[data-design='codex'] .cx-brief { padding: 16px; }
+  html[data-design='codex'] #menu .cx-settings { padding: 16px; }
+  html[data-design='codex'] .seg small { font-size: 10px; }
+  html[data-design='codex'] .cx-tactics figcaption { font-size: 10px; }
+}
+
+@media (max-width: 600px) and (orientation: portrait) {
+  html[data-design='codex'] .command-bar { display: grid; grid-template-columns: 44px repeat(3, minmax(0, 1fr)); }
+  html[data-design='codex'] .sel-count { grid-row: span 2; }
+  html[data-design='codex'] .command-bar button { min-height: 44px; font-size: 12px; padding: 0 4px; }
+  html[data-design='codex'] .command-bar kbd { display: none; }
+  html[data-design='codex'] .minimap { bottom: calc(122px + var(--safe-bottom)); --mm-max-h: 155px; }
+  html[data-design='codex'] .cx-launch-actions {
+    position: sticky;
+    bottom: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    padding-block: 10px;
+    margin-block: -10px;
+    background: #101e27;
+    box-shadow: 0 -10px 18px #101e27;
+  }
+  html[data-design='codex'] .cx-launch-note { grid-column: 1 / -1; }
+}
+
+@media (max-width: 600px) and (max-height: 700px) and (orientation: portrait) {
+  html[data-design='codex'] .cx-launch-note { display: none; }
+}
+
+@media (pointer: coarse) {
+  html[data-design='codex'] .minimap-tools .icon-btn { width: 44px; min-width: 44px; height: 44px; }
+  html[data-design='codex'] #help .controls :is(th, td):nth-child(2) { display: none; }
+  html[data-design='codex'] #help .controls td:first-child { width: 30%; }
 }
 
 @media (max-height: 520px) and (orientation: landscape) {
   html[data-design='codex'] #menu { padding: 12px 20px; gap: 12px; }
-  html[data-design='codex'] .cx-stage { grid-template-columns: minmax(170px, 0.8fr) minmax(300px, 1fr); max-width: 1000px; }
+  html[data-design='codex'] .cx-stage { grid-template-columns: minmax(140px, 0.65fr) minmax(340px, 1fr); max-width: 1000px; }
   html[data-design='codex'] .cx-brief { padding: 22px; border: 0; }
-  html[data-design='codex'] .cx-title h1 { font-size: 32px; }
+  html[data-design='codex'] .cx-title h1 { font-size: clamp(22px, 3.8vw, 32px); white-space: nowrap; }
   html[data-design='codex'] .cx-manifest { font-size: 11px; }
   html[data-design='codex'] .cx-tactics,
   html[data-design='codex'] .cx-principles,
@@ -461,16 +583,26 @@ html[data-design='codex'] :is(#result, #confirm) h1 {
   html[data-design='codex'] .cx-launch-note { display: none; }
   html[data-design='codex'] #menu .cx-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; padding: 18px; border-top: 0; border-left: 1px solid var(--panel-border); border-radius: 0 12px 12px 0; }
   html[data-design='codex'] .cx-settings .field { gap: 5px; grid-column: auto; grid-row: auto; }
+  html[data-design='codex'] .cx-settings .seg { gap: 4px; }
+  html[data-design='codex'] .cx-settings .seg button { min-width: 0; padding-inline: 3px; font-size: 12px; white-space: nowrap; }
   html[data-design='codex'] .cx-settings .seg[data-name='mode'] button { height: 44px; padding: 8px; }
   html[data-design='codex'] .cx-settings .seg small { display: none; }
   html[data-design='codex'] .cx-settings .mode-desc { display: none; }
+  html[data-design='codex'] .cx-map-settings summary span { display: none; }
+  html[data-design='codex'] .cx-launch-actions { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; gap: 14px; }
   html[data-design='codex'] .cx-settings :is(.primary, .ghost) { height: 44px; min-height: 44px; margin: 0; grid-column: auto; grid-row: auto; }
   html[data-design='codex'] .command-bar button { min-height: 0; }
   html[data-design='codex'] .top-bar { padding-top: calc(4px + var(--safe-top)); }
-  html[data-design='codex'] .icon-btn { min-width: 36px; height: 36px; }
+  html[data-design='codex'] .icon-btn { min-width: 44px; height: 44px; }
+}
+
+@media (max-height: 360px) and (orientation: landscape) {
+  html[data-design='codex'] .command-bar { padding: 2px; gap: 2px; }
+  html[data-design='codex'] .command-bar button { min-height: 44px; }
+  html[data-design='codex'] .sel-count { padding: 0 4px; border-right: 0; border-bottom: 1px solid var(--panel-border); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html[data-design='codex'] button { transition: none; }
-  html[data-design='codex'] .wave.alert span { animation: none; }
+  html[data-design='codex'] *,
+  html[data-design='codex'] *::after { transition: none; animation: none; }
 }

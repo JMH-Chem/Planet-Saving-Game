@@ -15,7 +15,7 @@ export function createCodexMenu(panel: HTMLElement, comparison: HTMLElement): vo
     <p class="cx-eyebrow">작은 함대, 큰 선택.</p>
     <div class="cx-title"></div>
     <p class="cx-manifest">한 번의 이동이 전술이 된다.<br>병력을 모으고, 펼치고, 당신의 궤도를 넓히세요.</p>
-    <figure class="cx-tactics">
+    <figure class="cx-tactics" aria-label="집중 대형으로 대기권 안을 돌파하거나, 산개 대형으로 바깥을 포위하세요">
       <svg viewBox="0 0 520 304" fill="none" aria-hidden="true">
         <defs>
           <radialGradient id="cx-globe" cx=".3" cy=".23" r=".85">
@@ -41,7 +41,7 @@ export function createCodexMenu(panel: HTMLElement, comparison: HTMLElement): vo
         <text x="43" y="253" fill="#d5e8a4" font-size="11" letter-spacing="2">돌파</text>
         <circle cx="260" cy="32" r="3" fill="#d5e8a4"/>
       </svg>
-      <figcaption><span>안으로 모이면 <b>돌파</b></span><span>밖으로 펼치면 <b>포위</b></span></figcaption>
+      <figcaption><span><b>집중 → 돌파</b>대기권 안으로 진입</span><span><b>산개 → 포위</b>바깥에서 수비대와 교전</span></figcaption>
     </figure>
     <ol class="cx-principles"><li><span>01</span>병력을 고르고</li><li><span>02</span>대형을 정하고</li><li><span>03</span>행성을 차지하세요</li></ol>`;
   brief.querySelector('.cx-title')!.append(panel.querySelector('h1')!);
@@ -56,11 +56,35 @@ export function createCodexMenu(panel: HTMLElement, comparison: HTMLElement): vo
   const mode = panel.querySelector('.seg[data-name="mode"]')!;
   mode.querySelector('[data-v="conquest"]')!.insertAdjacentHTML('beforeend', '<small>행성을 넓히는 전투</small>');
   mode.querySelector('[data-v="defense"]')!.insertAdjacentHTML('beforeend', '<small>모성을 지키는 전투</small>');
-  panel.querySelector('#btn-start')!.textContent = '출격하기  ↗';
+  // 덜 자주 바꾸는 맵 설정을 접어 작은 화면에서도 주요 선택과 출격 버튼을 먼저 보여 준다.
+  const mapSettings = document.createElement('details');
+  mapSettings.className = 'cx-map-settings';
+  mapSettings.innerHTML = '<summary>맵 설정 <span>같은 전장 다시 플레이</span></summary>';
+  const seedField = panel.querySelector('#seed')!.closest('.field')!;
+  seedField.before(mapSettings);
+  mapSettings.append(seedField);
+  const seedHint = document.createElement('p');
+  seedHint.id = 'cx-seed-hint';
+  seedHint.className = 'cx-seed-hint';
+  seedHint.textContent = '시드와 전투 설정, 화면 방향이 같으면 같은 배치로 시작합니다.';
+  seedField.append(seedHint);
+  panel.querySelector('#seed')!.setAttribute('aria-describedby', seedHint.id);
+
+  const actions = document.createElement('div');
+  actions.className = 'cx-launch-actions';
+  const start = panel.querySelector('#btn-start')!;
+  start.textContent = '출격하기  ↗';
+  actions.append(start, panel.querySelector('#btn-howto')!);
   const note = document.createElement('p');
   note.className = 'cx-launch-note';
-  note.textContent = matchMedia('(pointer: coarse)').matches ? '행성을 탭해 선택 · 목표를 탭해 이동' : '좌클릭으로 선택 · 우클릭으로 이동';
-  panel.append(note);
+  const pointer = matchMedia('(pointer: coarse)');
+  const updateHint = () => {
+    note.textContent = pointer.matches ? '아군 행성을 탭해 선택 · 목표를 탭해 이동' : '아군 행성 클릭으로 선택 · 우클릭으로 이동';
+  };
+  updateHint();
+  pointer.addEventListener('change', updateHint);
+  actions.append(note);
+  panel.append(actions);
   stage.append(brief, panel);
   menu.append(header, stage);
 }

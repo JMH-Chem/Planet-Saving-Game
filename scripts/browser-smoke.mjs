@@ -92,6 +92,42 @@ async function click(selector) {
     await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, session);
   }
 }
+async function key(key, code = key, modifiers = 0) {
+  const virtual = { Tab: 9, Escape: 27, Enter: 13 }[key];
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, modifiers, windowsVirtualKeyCode: virtual, ...(key === 'Enter' ? { text: '\r' } : {}) }, session);
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, modifiers, windowsVirtualKeyCode: virtual }, session);
+}
+async function visibleControl(selector, minSize = 0) {
+  const result = await evaluate(`(() => {
+    const el = document.querySelector(${JSON.stringify(selector)}), r = el.getBoundingClientRect();
+    return {visible:r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth && el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)), x:r.x, y:r.y, width:r.width, height:r.height};
+  })()`);
+  assert.ok(result.visible, `Control must be visible without scrolling: ${selector} ${JSON.stringify(result)}`);
+  assert.ok(result.width >= minSize && result.height >= minSize, `Touch target too small: ${selector} ${JSON.stringify(result)}`);
+}
+async function modalKeyboardChecks() {
+  await click('#btn-help');
+  assert.equal(await evaluate('document.activeElement.id'), 'help-heading');
+  assert.ok(await evaluate('document.querySelector("#hud").inert && document.querySelector("#help").getAttribute("aria-modal") === "true"'));
+  await key('Tab');
+  assert.equal(await evaluate('document.activeElement.id'), 'btn-help-close');
+  await key('Tab');
+  assert.equal(await evaluate('document.activeElement.id'), 'btn-help-close');
+  await key('Tab', 'Tab', 8);
+  assert.equal(await evaluate('document.activeElement.id'), 'btn-help-close');
+  await key('Escape');
+  assert.equal(await evaluate('document.activeElement.id'), 'btn-help');
+  assert.equal(await evaluate('window.__game.paused'), false);
+  await click('#btn-menu');
+  assert.equal(await evaluate('document.activeElement.id'), 'btn-confirm-stay');
+  await key('Tab');
+  assert.equal(await evaluate('document.activeElement.id'), 'btn-confirm-leave');
+  await key('Tab', 'Tab', 8);
+  assert.equal(await evaluate('document.activeElement.id'), 'btn-confirm-stay');
+  await key('Escape');
+  assert.equal(await evaluate('document.activeElement.id'), 'btn-menu');
+  assert.equal(await evaluate('window.__game.paused'), false);
+}
 async function screenshot(name) {
   if (!screenshots) return;
   const { data } = await send('Page.captureScreenshot', { format: 'webp', quality: 82 }, session);
@@ -109,12 +145,26 @@ try {
   await send('Runtime.enable', {}, session);
   await send('Page.enable', {}, session);
   for (const design of ['original', 'codex']) {
-    for (const [width, height, mobile] of [[1280, 800, false], [390, 844, true], [320, 568, true], [844, 390, true]]) {
+    for (const [width, height, mobile] of [[1280, 800, false], [768, 1024, true], [390, 844, true], [320, 568, true], [844, 390, true], [568, 320, true]]) {
       await viewport(width, height, mobile);
       await navigate(`?design=${design}&seed=42&ai=2&difficulty=hard&debug`);
       await until(`document.documentElement.dataset.design === '${design}' && document.querySelector('#seed')?.value === '42' && document.querySelector('#game')?.width === ${width}`);
       assert.ok(await evaluate("document.querySelector('#menu').scrollWidth <= document.querySelector('#menu').clientWidth + 1"), `${design}: menu overflows at ${width}`);
-      if (width === 1280 || width === 390) await screenshot(`${design}-menu-${width}`);
+      assert.ok(await evaluate(`[...document.querySelectorAll('.seg button')].every(b => b.getAttribute('aria-pressed') === String(b.classList.contains('on')))`), 'Menu selection must have an accessible state');
+      if (design === 'codex') {
+        await visibleControl('#btn-start', 44);
+        await visibleControl('.design-switch a:last-child', 44);
+        await screenshot(`${design}-menu-${width}`);
+        await click('.cx-map-settings summary');
+        await click('#seed');
+        await key('Tab');
+        assert.equal(await evaluate('document.activeElement.id'), 'seed-random');
+        await click('.cx-map-settings summary');
+        await evaluate('document.querySelector("#menu").scrollTop = 0');
+        // Every difficulty option stays reachable even on a short landscape phone.
+        await click('.seg[data-name="difficulty"] [data-v="easy"]');
+        await click('.seg[data-name="difficulty"] [data-v="hard"]');
+      } else if (width === 1280 || width === 390) await screenshot(`${design}-menu-${width}`);
       await click('#btn-start');
       await until('!!window.__game && window.__game.world.time > 0.3 && !document.querySelector("#hud").hidden');
       assert.equal(await evaluate('window.__game.match.settings.seed'), 42);
@@ -128,13 +178,24 @@ try {
       assert.equal(await evaluate('window.__game.world.time'), t);
       await click('#btn-pause');
       await until(`window.__game.world.time > ${t}`);
-      if (width === 1280 || width === 390) await screenshot(`${design}-game-${width}`);
+      if (design === 'codex' && mobile) {
+        for (const selector of ['#btn-pause', '#btn-help', '#btn-home', '#btn-fit', ...['select-all', 'halve', 'clear', 'formation', 'attack-all', 'return'].map(cmd => `[data-cmd="${cmd}"]`)]) await visibleControl(selector, 44);
+      }
+      if (design === 'codex' || width === 1280 || width === 390) await screenshot(`${design}-game-${width}`);
       // 3인전에서 플레이어가 먼저 전멸해도 실제 결과 화면이 열린다.
       if (width === 1280) {
+        await modalKeyboardChecks();
         await evaluate(`(() => { const w=window.__game.world; for(const p of w.planets) if(p.owner===1) w.capture(p,2); for(const u of w.units) if(u.faction===1) u.hp=0; })()`);
         await until('!document.querySelector("#result").hidden');
         assert.equal(await evaluate('document.querySelector("#result-title").textContent'), '패배');
         assert.equal(await evaluate('window.__game.world.winner'), null);
+        assert.equal(await evaluate('document.activeElement.id'), 'btn-retry');
+        await key('Tab');
+        assert.equal(await evaluate('document.activeElement.id'), 'btn-to-menu');
+        await key('Tab');
+        assert.equal(await evaluate('document.activeElement.id'), 'btn-retry');
+        await key('Enter');
+        await until('document.querySelector("#result").hidden && !document.querySelector("#hud").inert && window.__game.world.time > 0.2 && !window.__game.match.finished');
       }
       console.log(`PASS ${design}: ${width}×${height}, start/select/pause/resume${width === 1280 ? '/defeat' : ''}`);
     }
@@ -145,6 +206,11 @@ try {
     assert.equal(await evaluate('document.querySelector("#wave").hidden'), false);
     await click('#btn-help');
     assert.equal(await evaluate('window.__game.paused'), true);
+    assert.ok(await evaluate('document.querySelector("#help").scrollWidth <= document.querySelector("#help").clientWidth + 1'), 'Mobile help must not overflow horizontally');
+    if (design === 'codex') {
+      await visibleControl('#btn-help-close', 44);
+      await screenshot('codex-help-390');
+    }
     await click('#btn-help-close');
     assert.equal(await evaluate('window.__game.paused'), false);
     console.log(`PASS ${design}: mobile defense/help`);
@@ -165,6 +231,9 @@ try {
   console.log('PASS design comparison preserves mode/AI/difficulty/seed, including seed 0');
   assert.deepEqual(errors, []);
   console.log('Browser smoke passed; no JavaScript exceptions or console errors.');
+} catch (error) {
+  await screenshot('failure').catch(() => {});
+  throw error;
 } finally {
   if (browser.exitCode === null) await send('Browser.close').catch(() => {});
   if (browser.exitCode === null) await Promise.race([new Promise((resolve) => browser.once('exit', resolve)), delay(2000)]);

@@ -8,6 +8,7 @@ import { Minimap } from './render/minimap';
 import type { MatchSettings } from './sim/match';
 import { PLAYER, type GameEvent, type GameMode } from './sim/types';
 import { Alerts } from './ui/alerts';
+import { ModalDialogs } from './ui/dialogs';
 import { Hud } from './ui/hud';
 import { readLaunchSettings } from './ui/launch';
 
@@ -23,6 +24,7 @@ const result = $('result');
 const confirmBox = $('confirm');
 const seedInput = $<HTMLInputElement>('seed');
 const hud = new Hud();
+const dialogs = new ModalDialogs([help, confirmBox, result], [canvas, hud.root, menu]);
 
 const DIFFICULTY_LABEL: Record<Difficulty, string> = { easy: '쉬움', normal: '보통', hard: '어려움' };
 const MODE_DESC: Record<GameMode, string> = {
@@ -69,6 +71,7 @@ function teardown(): void {
 
 /** 메뉴 뒤에서 AI 끼리 싸우는 관전 화면 */
 function showMenu(): void {
+  const returningFromDialog = dialogs.reset();
   teardown();
   hud.show(false);
   result.hidden = true;
@@ -84,9 +87,11 @@ function showMenu(): void {
   game.speed = 1.5;
   layout(true);
   game.start();
+  if (returningFromDialog) $('btn-start').focus({ preventScroll: true });
 }
 
 function startMatch(s: MatchSettings): void {
+  dialogs.reset();
   teardown();
   settings = s;
   menu.hidden = true;
@@ -161,12 +166,8 @@ function showResult(winner: number | null): void {
   window.clearTimeout(resultTimer);
   resultTimer = window.setTimeout(() => {
     if (game !== g) return;
-    // 도움말 · 나가기 확인창 위에 겹치지 않게 닫는다. 끝나기 직전에 누른 HUD 버튼에 남은 포커스도 떼어
-    // Enter · Space 가 가려진 그 버튼을 누르지 않게 한다
-    help.hidden = true;
-    confirmBox.hidden = true;
-    result.hidden = false;
-    (document.activeElement as HTMLElement | null)?.blur();
+    // 끝나기 직전에 열었던 창을 교체하고 결과 화면 안으로 포커스를 옮긴다.
+    dialogs.open(result, $('btn-retry'));
   }, 1200);
 }
 
@@ -318,17 +319,27 @@ document.querySelectorAll<HTMLElement>('.command-bar [data-cmd]').forEach((btn) 
   btn.addEventListener('click', () => runCommand(btn.dataset.cmd!));
 });
 
+const segValue = (name: string) => document.querySelector<HTMLElement>(`.seg[data-name="${name}"] .on`)!.dataset.v!;
+const setSeg = (name: string, v: string) =>
+  document.querySelectorAll<HTMLElement>(`.seg[data-name="${name}"] button`).forEach((b) => {
+    const selected = b.dataset.v === v;
+    b.classList.toggle('on', selected);
+    b.setAttribute('aria-pressed', String(selected));
+  });
+
 document.querySelectorAll<HTMLElement>('.seg').forEach((seg) => {
+  const label = seg.parentElement!.querySelector('label')!;
+  label.id ||= `seg-label-${seg.dataset.name}`;
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-labelledby', label.id);
+  if (seg.dataset.name === 'mode') seg.setAttribute('aria-describedby', 'mode-desc');
+  setSeg(seg.dataset.name!, seg.querySelector<HTMLElement>('.on')!.dataset.v!);
   seg.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest('button');
     if (!btn) return;
-    seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === btn));
+    setSeg(seg.dataset.name!, btn.dataset.v!);
   });
 });
-
-const segValue = (name: string) => document.querySelector<HTMLElement>(`.seg[data-name="${name}"] .on`)!.dataset.v!;
-const setSeg = (name: string, v: string) =>
-  document.querySelectorAll<HTMLElement>(`.seg[data-name="${name}"] button`).forEach((b) => b.classList.toggle('on', b.dataset.v === v));
 
 /** 방어전에는 적 진영이 침공군 하나뿐이라 진영 수 선택을 숨긴다 */
 function syncModeField(): void {
@@ -362,12 +373,11 @@ const openHelp = () => {
   if (!help.hidden) return;
   pausedBeforeHelp = !!game?.paused;
   if (game && !game.spectator) togglePause(true);
-  help.hidden = false;
-  // 닫기 버튼은 긴 도움말의 맨 아래에 있다: 포커스를 옮겨도 스크롤은 맨 위(규칙)에 둔다
-  $('btn-help-close').focus({ preventScroll: true });
+  dialogs.open(help, help.querySelector<HTMLElement>('h2')!);
+  help.scrollTop = 0;
 };
 const closeHelp = () => {
-  help.hidden = true;
+  dialogs.close();
   if (game && !game.spectator) togglePause(pausedBeforeHelp);
 };
 $('btn-howto').addEventListener('click', openHelp);
@@ -384,11 +394,10 @@ $('btn-menu').addEventListener('click', () => {
   if (!confirmBox.hidden) return;
   pausedBeforeConfirm = !!game?.paused;
   togglePause(true);
-  confirmBox.hidden = false;
-  $('btn-confirm-stay').focus();
+  dialogs.open(confirmBox, $('btn-confirm-stay'));
 });
 const closeConfirm = () => {
-  confirmBox.hidden = true;
+  dialogs.close();
   togglePause(pausedBeforeConfirm);
 };
 $('btn-confirm-leave').addEventListener('click', showMenu);
@@ -408,6 +417,7 @@ window.addEventListener(
   'keydown',
   (e) => {
     if (!dialogOpen()) return;
+    dialogs.trapTab(e);
     if (e.target instanceof HTMLInputElement || e.code === 'KeyM') return;
     e.stopPropagation();
     if (e.code !== 'Escape') return;
