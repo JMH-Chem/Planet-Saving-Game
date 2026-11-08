@@ -57,8 +57,9 @@ const HUD_IDS = ['minimap-wrap', 'minimap-tools', 'toasts', 'banner'];
 const HUD_BOX_TTL = 0.25;
 
 /**
- * 자동 품질이 마지막으로 고른 단계. 렌더러는 판(과 메뉴 배경)마다 새로 만들어지므로, 느린 기기가 판마다 상에서 다시
- * 시작해 몇 초씩 버벅이지 않게 모듈에 기억해 두고 다음 렌더러가 거기서 시작한다
+ * 자동 품질이 마지막으로 고른 단계. 렌더러는 판마다 새로 만들어지므로, 느린 기기가 판마다 상에서 다시
+ * 시작해 몇 초씩 버벅이지 않게 모듈에 기억해 두고 다음 판의 렌더러가 거기서 시작한다.
+ * 메뉴 배경(관전)은 읽지도 쓰지도 않는다: 메뉴 화면 합성 비용이 섞이고 맵 전체를 그려서 판의 비용과 다르다
  */
 let learnedQuality: QualityLevel = 'high';
 
@@ -120,8 +121,7 @@ export class Renderer {
   private territory = new TerritoryLayer();
   private bloom = new Bloom();
   private qm: QualityManager;
-  /** 직전 render() 시작 시각과 그 그리기에 든 시간 (품질 판단용, ms) */
-  private lastFrameAt = 0;
+  /** 직전 그리기에 든 시간 (품질 판단용, ms) */
   private lastRenderMs = 0;
   /** 대량 격추 연출을 더 낼 수 있는 횟수 (초당 HEAVY_RATE 씩 찬다) */
   private heavyTokens = HEAVY_BURST;
@@ -136,7 +136,12 @@ export class Renderer {
     this.reduced = prefersReducedMotion();
     this.spectator = !!opts.spectator;
     this.fx = new Effects(this.reduced ? 1500 : 3000);
-    this.qm = new QualityManager({ forced: typeof location !== 'undefined' ? parseQualityParam(location.search) : null, initial: learnedQuality });
+    // 관전(메뉴 배경)은 상에서 시작해 자기 프레임으로만 고른다. 메뉴 화면 합성처럼 우리 그리기 밖의 비용은
+    // 내려 봐도 빨라지지 않아 곧 되돌아오고, 약한 GPU 에서 실제로 빨라지면 메뉴 배경만 낮춘다
+    this.qm = new QualityManager({
+      forced: typeof location !== 'undefined' ? parseQualityParam(location.search) : null,
+      initial: this.spectator ? 'high' : learnedQuality,
+    });
     if (typeof window !== 'undefined') {
       if (!dprQuery) watchDpr();
       dprTarget = this;
@@ -351,14 +356,13 @@ export class Renderer {
     else if (side < 0) fx.text(p.x, p.y - p.atmosphereRadius - 6, '함락', LOSS_COLOR, 24);
   }
 
-  render(world: World, cam: Camera, selection: ReadonlySet<number>, alpha: number, overlay: OverlayState, dt: number): void {
+  /** live = 실제로 진행 중인 판의 프레임 (일시정지 · 대화창 · 결과 화면이면 false): 그런 프레임만 품질 판단에 넣는다 */
+  render(world: World, cam: Camera, selection: ReadonlySet<number>, alpha: number, overlay: OverlayState, dt: number, live: boolean): void {
     // 품질: 직전 프레임과의 실제 간격 + 직전 그리기 시간으로 판단 (dt 는 0.1초로 잘려 있어 쓰지 않는다)
     const t0 = performance.now();
-    if (this.lastFrameAt > 0 && this.qm.sample(t0 - this.lastFrameAt, this.lastRenderMs)) {
-      learnedQuality = this.qm.level;
-      this.applyQuality();
-    }
-    this.lastFrameAt = t0;
+    if (this.qm.frame(t0, this.lastRenderMs, live)) this.applyQuality();
+    // 바꿔 보는 중인 단계는 물려주지 않는다 (시험 도중에 판이 끝나면 다음 판이 시험 단계에서 시작하지 않게)
+    if (!this.spectator) learnedQuality = this.qm.settled;
     const q = this.qm.settings;
 
     this.clock += dt;
