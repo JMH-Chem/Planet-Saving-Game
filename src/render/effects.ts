@@ -1,5 +1,5 @@
 import type { Bloom } from './bloom';
-import { drawSprite, glowSprite, mixHex, softSprite, withAlpha } from './sprites';
+import { drawSprite, glowSprite, mixHex, softSprite, SpriteSheet, withAlpha, type Sprite } from './sprites';
 
 // 짧게 살다 사라지는 시각 효과 전부 (레이저, 섬광, 불꽃, 파편, 연기, 충격파, 방어막 피격, 떠오르는 글자).
 // 대규모 전투에서 초당 수천 개가 생기므로 입자는 고정 크기 배열(SoA)에 담아 객체를 만들지 않고,
@@ -30,6 +30,43 @@ const BEAM_BUCKETS = 2;
 const SPARK_BUCKETS = 3;
 /** 발광 버퍼의 섬광 밝기 단계 수 */
 const FLASH_BUCKETS = 3;
+
+// 발광 버퍼의 섬광: 작은 것(대부분인 총구 · 착탄)은 네모(한 변 1.4r)를 모아 칠하고, 큰 것(행성 점령 · 대량 격추 · 확대한 화면의
+// 폭발)은 가장자리까지 부드러운 둥근 빛을 하나씩 찍는다. 네모가 흐림이 덮는 폭(합성 단계 버퍼 몇 px)보다 커지면 모서리가 남아
+// 각진 판으로 보인다 (경로에 원을 모아 칠하면 테두리가 남고 네모보다 비싸다). 둘의 빛 총량을 같게 맞춰 문턱을 넘어도 밝기가 튀지 않는다.
+// 찍기는 하나하나가 그리기 한 번이라 문턱을 낮추면 확대한 큰 전투에서 발광 비용이 커진다 (2 → 약 +11%, 3 → 약 +7%)
+/** 반경이 합성 단계 버퍼(품질 높음 1 단계, 중간 0 단계)로 이 px 이상인 섬광은 둥근 빛을 찍는다 */
+export const FLASH_STAMP_PX = 3;
+/** 섬광 네모의 반 변 / 섬광 반경 */
+const FLASH_RECT_HALF = 0.7;
+/** 섬광 네모의 밝기 (나이 t 에서 × (1 − t)²) */
+const FLASH_RECT_ALPHA = 0.6;
+
+/** 합성 단계 버퍼로 잰 반경이 blurPx 인 섬광을 둥근 빛으로 찍는가 */
+export const stampsFlash = (blurPx: number) => blurPx >= FLASH_STAMP_PX;
+
+/** 둥근 빛의 밝기 모양 (중심에서의 거리 ρ = 0~1): (1 − ρ²)². 가장자리에서 기울기까지 0 이라 테두리가 없다 */
+export const flashDome = (rho: number) => (rho >= 1 ? 0 : (1 - rho * rho) * (1 - rho * rho));
+/** 반경 1 둥근 빛의 밝기 총량 ∫(1 − ρ²)² dA = π/3 */
+const DOME_SUM = Math.PI / 3;
+
+/** 둥근 빛으로 찍을 때의 밝기 (나이 t = 0~1): 네모와 빛의 총량이 같게. 갓 생긴 섬광은 1 을 넘어 잘린다 */
+export function flashStampAlpha(t: number): number {
+  const rectSum = (2 * FLASH_RECT_HALF) ** 2 * FLASH_RECT_ALPHA;
+  return Math.min(1, (rectSum / DOME_SUM) * (1 - t) * (1 - t));
+}
+
+/** 발광 버퍼용 둥근 빛 스프라이트 (흰 심 없이 색만, 'lighter' 합성). 버퍼에서는 크게 찍어도 수십 px 라 작은 칸이면 된다 */
+let domeSheet: SpriteSheet | null = null;
+function domeSprite(color: string): Sprite {
+  return (domeSheet ??= new SpriteSheet(32, 16, 4)).get(color, (g, size) => {
+    const h = size / 2;
+    const grad = g.createRadialGradient(h, h, 0, h, h, h);
+    for (let k = 0; k <= 8; k++) grad.addColorStop(k / 8, withAlpha(color, flashDome(k / 8)));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
+  });
+}
 
 interface Beam {
   x1: number;
@@ -391,9 +428,10 @@ export class Effects {
     });
 
     // 섬광 · 불티: 미리 구운 발광 스프라이트.
-    // 발광 버퍼에는 섬광마다 스프라이트를 찍는 대신 색 · 밝기 단계별로 네모를 모아 한 번에 칠한다 (버퍼에서는 몇 px 짜리라
-    // 흐리고 나면 둥근 빛과 구별되지 않고, 수백 번의 그리기가 몇 번으로 준다)
+    // 발광 버퍼에는 작은 섬광은 색 · 밝기 단계별로 네모를 모아 한 번에 칠하고 (버퍼에서 몇 px 짜리라 흐리고 나면 둥근 빛과
+    // 구별되지 않고, 수백 번의 그리기가 몇 번으로 준다), 큰 섬광만 둥근 빛을 하나씩 찍는다 (위 FLASH_STAMP_PX 설명)
     const flashPaths: (Path2D | undefined)[] = [];
+    const blurUnit = bloom ? bloom.blurUnit : 1;
     for (let i = 0; i < this.n; i++) {
       const k = this.kind[i];
       if (k !== FLASH && k !== EMBER) continue;
@@ -406,12 +444,17 @@ export class Effects {
         r = this.size[i] * (0.75 + 0.5 * t);
         const a = (1 - t) * (1 - t);
         ctx.globalAlpha = a * 0.85;
-        if (bloom) {
+        if (bg && bloom) {
           // 섬광이 주변을 진영 색으로 물들이게 (흰 심을 넣으면 큰 전투가 하얗게 타 버린다)
-          const key = this.col[i] * FLASH_BUCKETS + Math.min(FLASH_BUCKETS - 1, Math.floor(t * FLASH_BUCKETS));
-          const fp = flashPaths[key] ?? (flashPaths[key] = new Path2D());
-          const h = r * 0.7;
-          fp.rect(x - h, y - h, h * 2, h * 2);
+          if (stampsFlash(r / blurUnit)) {
+            bg.globalAlpha = flashStampAlpha(t);
+            drawSprite(bg, domeSprite(color), x, y, r);
+          } else {
+            const key = this.col[i] * FLASH_BUCKETS + Math.min(FLASH_BUCKETS - 1, Math.floor(t * FLASH_BUCKETS));
+            const fp = flashPaths[key] ?? (flashPaths[key] = new Path2D());
+            const h = r * FLASH_RECT_HALF;
+            fp.rect(x - h, y - h, h * 2, h * 2);
+          }
           bloom.mark(x, y, r);
         }
       } else {
@@ -425,7 +468,7 @@ export class Effects {
         if (!p) return;
         // 단계 가운데 나이의 밝기 (1 − t)²
         const t = ((key % FLASH_BUCKETS) + 0.5) / FLASH_BUCKETS;
-        bg.globalAlpha = 0.6 * (1 - t) * (1 - t);
+        bg.globalAlpha = FLASH_RECT_ALPHA * (1 - t) * (1 - t);
         bg.fillStyle = this.colors[Math.floor(key / FLASH_BUCKETS)];
         bg.fill(p);
       });
