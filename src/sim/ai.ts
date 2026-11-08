@@ -9,6 +9,132 @@ import type { World } from './world';
  */
 const WEAKEST_RIVAL_BONUS = 3;
 
+// ───────────────────────────── 이동 모형 ─────────────────────────────
+
+/**
+ * AI 가 내다보는 이동 시간. World 의 조향(가감속 · 선회 한계)과 무리 보폭 맞추기에 맞춘 값이다.
+ * 헤드리스 측정(궤도에서 출발한 무리 6~120기 · 거리 200~620 · 크기 조합 72 회): 평균 도착 시각 오차 돌파 0.05초 · 포위 0.15초 ·
+ * 합류 0.04초. 예전처럼 '거리 / 최고 속도' 로 보면 돌파의 첫 병력은 그보다 0.2~0.8초 일찍, 포위 무리는 0.4~3.1초 늦게,
+ * 합류 무리는 0.3~0.8초 늦게 닿았다 (견제가 본대보다 덜 앞서고, 늦게 출발시킨 무리가 어긋나던 까닭).
+ *  - 출발: 멈춘(궤도를 천천히 도는) 병력은 가속해야 최고 속도에 닿는다 → 직선 시간보다 speed / (2·accel) 늦다
+ *  - U 턴: 최고 속도로 가다 반대로 돌면 횡가속 한계(turnRate × speed) 안에서 호를 그리며 돈다 →
+ *    즉시 반전보다 2 / turnRate 남짓 늦고, 도는 동안 앞으로 speed / (2·turnRate) 남짓 더 나간다
+ *  - 돌파는 보폭을 맞추지 않는다: 병력마다 최고 속도로 들이쳐 출발 궤도의 앞쪽 병력이 먼저, 뒤쪽이 나중에 닿는다
+ *  - 포위 · 합류 · 이동은 보폭을 맞춘다: 가장 멀리 가는 병력(포위면 고리 끝 슬롯)에 맞춰 함께 닿고, 슬롯 앞에서 감속한다
+ */
+const SPEED = CONFIG.unit.speed;
+export const MOTION = {
+  /** 정지 → 최고 속도 가속으로 늦어지는 시간(초) */
+  startLag: SPEED / (2 * CONFIG.unit.accel),
+  /** 최고 속도에서 반대로 돌아설 때 늦어지는 시간(초) */
+  turnLag: 2 / CONFIG.unit.turnRate,
+  /** U 턴하는 동안 원래 방향으로 더 나가는 거리(px) */
+  turnReach: SPEED / (2 * CONFIG.unit.turnRate),
+  /** 슬롯에 멈춰 서는 명령(포위 · 합류)의 도착 감속으로 늦어지는 시간(초): 감속도 = 가속 한계 × 0.8 (World 의 ARRIVE_BRAKE) */
+  brakeLag: SPEED / (2 * CONFIG.unit.accel * 0.8),
+} as const;
+
+/**
+ * 수비대의 사격이 닿는 대기권 밖 거리(px): 가장 높은 궤도 + 사거리 − 대기권 두께.
+ * 이 띠 밖에서 돌아서면 한 발도 맞지 않는다
+ */
+export const FIRE_GAP = CONFIG.orbitBand[1] + CONFIG.unit.range - CONFIG.atmosphere;
+
+/** 무리가 목표에 닿는 시각(지금부터 초): 첫 병력 · 평균 · 마지막 병력 */
+export interface Eta {
+  first: number;
+  bulk: number;
+  last: number;
+}
+
+type Point = { x: number; y: number; px?: number; py?: number };
+export type MoveKind = 'dive' | 'siege' | 'join';
+
+/**
+ * 병력 하나가 (tx, ty) 쪽으로 최고 속도에 이르기까지 늦어지는 시간. 직전 틱 위치(px, py)로 지금 속도를 본다:
+ * 이미 그쪽으로 최고 속도면 0, 멈췄으면 startLag, 반대로 달리고 있으면 U 턴(turnLag)
+ */
+function lagOf(u: Point, tx: number, ty: number): number {
+  if (u.px === undefined || u.py === undefined) return MOTION.startLag;
+  const dx = tx - u.x, dy = ty - u.y;
+  const d = Math.hypot(dx, dy);
+  if (d < 1e-6) return 0;
+  const along = (((u.x - u.px) * dx + (u.y - u.py) * dy) / d) * CONFIG.tickRate;
+  const v = Math.max(-1, Math.min(1, along / SPEED));
+  // 같은 방향: 남은 가속분만큼 ((1 − v)² 에 비례), 반대 방향: 멈춘 경우와 U 턴 사이
+  return v >= 0 ? MOTION.startLag * (1 - v) * (1 - v) : MOTION.startLag + (MOTION.turnLag - MOTION.startLag) * -v;
+}
+
+/**
+ * 포위 고리 끝 슬롯까지의 길이: 중심에서 D 떨어진 곳에서 반지름 R 고리 위, 진입 방향에서 theta 만큼 돈 슬롯까지.
+ * 접선이 닿는 각도까지는 직선, 그 너머는 접선 + 대기권을 따라 도는 호 (World.detour 가 대기권을 비켜 간다)
+ */
+function ringPath(D: number, R: number, theta: number): number {
+  if (D <= R) return R * theta;
+  const tangent = Math.acos(R / D);
+  if (theta <= tangent) return Math.sqrt(D * D + R * R - 2 * D * R * Math.cos(theta));
+  return Math.sqrt(D * D - R * R) + R * (theta - tangent);
+}
+
+/** n 기 포위 고리의 반폭(rad): 진입 방향에서 좌우로 번갈아 lineSpacing 간격, 1열 정원을 넘으면 바깥 고리로 (orders.surroundPlanet) */
+function siegeHalfSpan(n: number, R: number): number {
+  const ring1 = Math.max(1, Math.floor((2 * Math.PI * R) / CONFIG.formation.lineSpacing));
+  return Math.min(Math.PI, (Math.ceil((Math.min(n, ring1) - 1) / 2) * CONFIG.formation.lineSpacing) / R);
+}
+
+/**
+ * 무리(병력 위치)가 행성 t 에 닿는 시각. kind:
+ *  - dive: 대기권 경계까지 병력마다 최고 속도 (보폭 맞추기 없음)
+ *  - siege: 대기권 바로 밖 포위 고리 슬롯까지, 고리 끝 슬롯에 맞춰 보폭을 맞춘다
+ *  - join: 아군 행성 대기권 경계까지 보폭을 맞춘다 (World.paceDistance)
+ */
+export function groupEta(units: readonly Point[], t: Planet, kind: MoveKind): Eta {
+  const n = units.length;
+  if (n === 0) return { first: 0, bulk: 0, last: 0 };
+  const atm = t.atmosphereRadius;
+  let lagSum = 0, near = Infinity, far = 0, sum = 0, cx = 0, cy = 0;
+  for (const u of units) {
+    const g = Math.max(0, Math.hypot(u.x - t.x, u.y - t.y) - atm);
+    near = Math.min(near, g);
+    far = Math.max(far, g);
+    sum += g;
+    cx += u.x;
+    cy += u.y;
+    lagSum += lagOf(u, t.x, t.y);
+  }
+  const lag = lagSum / n;
+  if (kind === 'dive') return { first: near / SPEED + lag, bulk: sum / n / SPEED + lag, last: far / SPEED + lag };
+
+  const { arriveWindow, minPace } = CONFIG.formation;
+  /** 보폭 맞추기: 가장 먼 병력(lead)이 최고 속도, 그보다 arriveWindow 넘게 일찍 닿을 병력은 남은 거리 비율로 (하한 minPace) */
+  const paced = (remaining: number, lead: number) => {
+    const due = lead - SPEED * arriveWindow;
+    if (remaining >= due || due <= 0) return remaining / SPEED;
+    return remaining / due >= minPace ? due / SPEED : remaining / (minPace * SPEED);
+  };
+  if (kind === 'join') {
+    let total = 0;
+    for (const u of units) total += paced(Math.max(0, Math.hypot(u.x - t.x, u.y - t.y) - atm), far);
+    return { first: paced(near, far) + lag, bulk: total / n + lag, last: far / SPEED + lag };
+  }
+  // 포위: 무게중심에서 고리 끝 슬롯까지가 가장 먼 길 (슬롯 배정이 경로 합을 줄이므로 무리 폭은 거의 더하지 않는다)
+  const R = t.radius + CONFIG.surroundAltitude;
+  const D = Math.hypot(cx / n - t.x, cy / n - t.y);
+  const lead = ringPath(D, R, siegeHalfSpan(n, R));
+  const nearest = Math.max(0, near + atm - R);
+  const first = paced(nearest, lead) + lag + MOTION.brakeLag;
+  const last = lead / SPEED + lag + MOTION.brakeLag;
+  return { first, bulk: (first + last) / 2, last };
+}
+
+/** 행성 궤도에 있는 병력 전부가 to 로 갈 때의 도착 시각 (병력 위치를 모를 때: 궤도 가운데 고도의 8 점으로 본다) */
+export function orbitEta(from: Planet, to: Planet, kind: MoveKind): Eta {
+  const r = from.radius + (CONFIG.orbitBand[0] + CONFIG.orbitBand[1]) / 2;
+  const pts: Point[] = [];
+  for (let i = 0; i < 8; i++) pts.push({ x: from.x + Math.cos((i * Math.PI) / 4) * r, y: from.y + Math.sin((i * Math.PI) / 4) * r });
+  return groupEta(pts, to, kind);
+}
+
 // ───────────────────────────── 전투 추정 ─────────────────────────────
 
 export type Tactic = 'dive' | 'siege';
@@ -54,8 +180,10 @@ export interface BattleEstimate {
 
 /**
  * 전투 추정 모델 계수. 실제 시뮬레이션 3160 판(크기 3 × 중립/적 × 공격 6~130 × 수비 0~70 × 방어도 100/40% × 돌파/포위,
- * 거리 140 · 240)에 맞춰 좌표 하강으로 고른 값: 점령 성패 97.5%, 전술(돌파/포위/대기) 85.5%, 실측 비용이 3 이상 갈리는 판은
- * 91.9% 일치, 손실 오차 평균 2.1기 · 시간 오차 평균 1.1초. 다시 재려면 tests/balance.harness.test.ts 의 estimator 묶음
+ * 거리 140 · 240)에 맞춰 좌표 하강으로 고른 값. 지금의 이동(가감속 · 선회 한계 · 포위 무리 보폭 맞추기 · 돌파는 저마다 최고 속도)
+ * 위에서 다시 맞췄다: 점령 성패 98.2%, 전술(돌파/포위/대기) 91.4%, 실측 비용이 3 이상 갈리는 판은 94.3% 일치,
+ * 손실 오차 평균 2.2기 · 시간 오차 평균 1.0초 (예전 이동에 맞춘 계수 그대로면 97.9% · 90.4% · 93.7% · 2.2기 · 1.6초:
+ * 포위 시간을 평균 2.3초 짧게 봤다). 다시 재려면 tests/balance.harness.test.ts 의 estimator 묶음
  */
 export const BATTLE_MODEL = {
   /** 적분 간격(초) */
@@ -77,17 +205,17 @@ export const BATTLE_MODEL = {
   /**
    * 포위: 고리를 a 만큼(1열 정원 대비) 덮으면 수비대 중 exposure·a^arcPow 가 사거리 안에 든다.
    * 사거리 안의 수비대 하나는 초당 한 발을 쏘고 focus 발을 맞는다(그 이상 몰리면 남는 사수는 논다). 1열에 못 선 병력은 ring2 만큼만 거든다.
-   * 맞춰 보니 arcPow 가 0 에 가깝다: 수비대가 궤도를 돌며 결국 고리 밑을 지나므로, 얼마나 덮느냐보다 몇 발이 몰리느냐가 속도를 정한다
+   * 포위 무리가 고리에 한꺼번에 서게 된 뒤로는 덮은 비율에 거의 비례한다 (arcPow ≈ 1)
    */
-  siegeExposure: 1,
-  siegeArcPow: 0.15,
-  siegeFocus: 2,
-  siegeRing2: 0.15,
+  siegeExposure: 1.464,
+  siegeArcPow: 1,
+  siegeFocus: 2.376,
+  siegeRing2: 0.871,
   /** 포위 도착 때 뭉친 채 수비대와 스치며 주고받는 피해 (접근 교전과 같은 꼴) */
-  siegeContactKill: 0.25,
-  siegeContactLoss: 0.1,
-  /** 포위 고리가 다 서기까지 걸리는 시간 배율 (가장 먼 슬롯까지 걷는 시간 대비) */
-  siegeSettle: 0.28,
+  siegeContactKill: 0.2,
+  siegeContactLoss: 0.09,
+  /** 대기권 거리에서 고리 끝 슬롯까지 더 걸어 고리가 다 서기까지의 시간 배율 (직선 + 대기권을 따라 도는 호 / 최고 속도 + 감속 대비) */
+  siegeSettle: 0.66,
   /** 포위 → 돌파 전환: 수비대가 max(2, 공격측 × siegeSwitch) 이하가 되거나 siegeLimit 초가 지나면 */
   siegeSwitch: 0.12,
   siegeLimit: 30,
@@ -126,23 +254,25 @@ export function estimateBattle(inp: BattleInput, tactic: Tactic): BattleEstimate
   if (tactic === 'siege') {
     const ringR = r + CONFIG.surroundAltitude;
     const ring1 = Math.floor((2 * Math.PI * ringR) / CONFIG.formation.lineSpacing);
-    // 진입 방향에서 좌우로 펼쳐지는 데 걸리는 시간: 1열이 다 서려면 가장 먼 슬롯까지 (최대 반 바퀴)
-    const spread = inp.engaged ? 0 : (M.siegeSettle * Math.min(Math.PI * ringR, (Math.min(A, ring1) * CONFIG.formation.lineSpacing) / 2)) / speed;
     if (!inp.engaged) {
+      // 포위 무리는 고리 끝 슬롯까지 가는 병력에 보폭을 맞춰 한꺼번에 선다 (World.pace): 대기권 거리에 닿은 뒤
+      // 고리를 따라 더 걷는 만큼 늦게, 그사이엔 아직 사거리 밖이다
+      const D = r + CONFIG.atmosphere + Math.max(0, inp.travel) * speed;
+      const walk = ringPath(D, ringR, siegeHalfSpan(A, ringR)) - (D - r - CONFIG.atmosphere);
+      pass(M.siegeSettle * (Math.max(0, walk) / speed + MOTION.brakeLag), false);
       const x = (A * G) / Math.max(1, A + G);
       G -= Math.min(G * 0.5, M.siegeContactKill * x);
       A -= Math.min(A, M.siegeContactLoss * x);
     }
     const start = t;
     while (t - start < M.siegeLimit && A > 0.5) {
-      const settled = Math.min(1, (t - start + dt) / Math.max(dt, spread));
-      const arc = (Math.min(A, ring1) * settled) / ring1;
+      const arc = Math.min(A, ring1) / ring1;
       const exposed = G * M.siegeExposure * Math.pow(arc, M.siegeArcPow);
       const front = Math.min(A, ring1) + M.siegeRing2 * Math.max(0, A - ring1);
       A -= (exposed / hp) * dt;
       G = Math.max(0, G - (Math.min(front, M.siegeFocus * exposed) / hp) * dt);
       pass(dt, false);
-      if (t - start >= spread && G <= Math.max(2, A * M.siegeSwitch)) break;
+      if (G <= Math.max(2, A * M.siegeSwitch)) break;
     }
     if (A <= 0.5) return fail();
   }
@@ -153,15 +283,13 @@ export function estimateBattle(inp: BattleInput, tactic: Tactic): BattleEstimate
     A -= Math.min(A, M.approachLoss * x);
   }
 
-  const [lo, hi] = CONFIG.orbitBand;
-  const ringCap = ((2 * Math.PI) / CONFIG.formation.clusterSpacing) * (3 * r + (lo + 2) + (lo + hi) / 2 + (hi - 2));
   const diveStart = t;
   while (D > 0 && A > 0.5 && t - diveStart < M.diveLimit) {
     // 강하 병력은 병력을 쏘지 않으니 수비대는 줄지 않고 공격측은 늘지 않는다 → 피해 속도는 떨어지기만 한다.
     // 지금 속도로도 남은 시간 안에 못 깎으면 끝까지 돌려 볼 것 없이 실패 (판단 시간의 대부분을 아낀다)
     const rate = planetDamageMult * A * (A / (A + G));
     if (rate * (M.diveLimit - (t - diveStart)) < D) return fail();
-    const exposed = Math.min(1, M.diveBase + (M.diveDefenders * G) / ringCap);
+    const exposed = diveExposure(G, r);
     D -= rate * dt;
     A -= ((G * exposed) / hp) * dt;
     pass(dt, true);
@@ -179,6 +307,16 @@ export function estimateBattle(inp: BattleInput, tactic: Tactic): BattleEstimate
     }
   }
   return { tactic, success: true, time: t, losses: inp.attackers - A, survivors: A, defendersLeft: G };
+}
+
+/**
+ * 돌파 중 강하 병력을 사거리에 둔 수비대 비율 = diveBase + diveDefenders · G / C (C = 돌파 고리 정원, 고리 셋).
+ * 수비대 G 기가 강하 병력에게 초당 G × 이 비율 발을 쏜다
+ */
+export function diveExposure(defenders: number, radius: number): number {
+  const [lo, hi] = CONFIG.orbitBand;
+  const ringCap = ((2 * Math.PI) / CONFIG.formation.clusterSpacing) * (3 * radius + (lo + 2) + (lo + hi) / 2 + (hi - 2));
+  return Math.min(1, BATTLE_MODEL.diveBase + (BATTLE_MODEL.diveDefenders * defenders) / ringCap);
 }
 
 export interface TacticChoice {
@@ -327,6 +465,7 @@ export function projectArmy(army: Army, planets: readonly Planet[], horizon: num
       if (along <= 0) continue;
       const side = Math.sqrt(Math.max(0, d * d - along * along));
       if (side > p.atmosphereRadius + 40) continue;
+      // 가장 이른 도착: 보폭을 맞춰 오는 무리라도 앞줄은 최고 속도다 (막는 쪽은 그때까지 준비돼 있어야 한다)
       eta = gap / CONFIG.unit.speed;
     }
     if (eta <= horizon && eta < bestEta) {
@@ -347,7 +486,11 @@ interface Operation {
   units: Set<number>;
   /** stage = 대기권 밖에서 포위 교전 중, assault = 돌파 중 (hunt 는 무시) */
   phase: 'stage' | 'assault';
+  /** 포위하다 돌파로 바꾼 작전: 이미 수비대와 붙어 있었으므로 돌파 재평가를 처음부터 '교전 중' 으로 한다 */
+  staged: boolean;
   startedAt: number;
+  /** 포위 고리가 선 시각 (아직이면 Infinity): 포위 시간 제한은 이동 시간을 빼고 여기서부터 잰다 (추정기의 siegeLimit 과 같게) */
+  settledAt: number;
   initial: number;
   /** 동시 도착: 아직 출발하지 않은 무리. at 이 되면 같은 명령으로 출발한다 */
   pending: { ids: number[]; at: number }[];
@@ -386,6 +529,11 @@ const WAIT_STEPS = [4, 8, 14];
 const PLAN_CANDIDATES = 6;
 /** 진행 중인 작전을 '지는 싸움'으로 볼 때 몇 번 연속으로 그렇게 추정돼야 물리는지 */
 const DOUBT_LIMIT = 2;
+/**
+ * 한 번 더 확인하느라 다음 판단까지 기다리는 값이 병력의 이 비율을 넘으면 첫 추정만으로 물린다.
+ * 기다리는 동안 수비대 사격 띠 안에 있거나 들어서는 병력이 맞는 수에, U 턴(반전 지연 · 더 나가는 거리)까지 쳐서 잰다
+ */
+const DELAY_LOSS_SHARE = 0.1;
 /** 재평가 여유: 지금 병력이 이 배였어도 진다고 나와야 물린다 (출발 때의 추정을 한 번의 흔들림으로 뒤집지 않게) */
 const RETREAT_SLACK = 1.25;
 /** 작전 시간 제한(초): 이만큼 지나도 못 먹으면 귀환 */
@@ -414,7 +562,8 @@ const COUNTER_BONUS = 2;
  * - 방어: 다가오는 적 무리의 방향 · 속도로 도착을 내다보고, 막을 만큼만 미리 증원한다. 모성은 비우지 않는다.
  * - 기회: 막아 낸 직후 공격자 행성 반격, 우주에 떨어진 작은 무리 사냥, 증원이 멀리 있는 얇은 행성 우선.
  * - 협동(어려움): 여러 행성 병력의 도착 시각 맞추기, 본대 전에 이웃 행성 견제.
- * - 진행 중인 작전은 매 판단 다시 추정해 질 싸움이면 일찍 물린다.
+ * - 진행 중인 작전은 매 판단 다시 추정해 질 싸움이면 일찍 물린다 (다가가는 동안부터: 대기권에 들어간 뒤 돌아서면 U 턴하는 동안 맞는다).
+ * - 도착 시각은 이동 모형(groupEta)으로 잰다: 출발 가속, 돌파는 병력마다 최고 속도, 포위 · 합류는 보폭을 맞춰 함께.
  * 난이도는 AIProfile 의 반응 속도 · 추정 착시/잡음 · 켜는 행동으로 나뉜다.
  */
 export class AIController {
@@ -623,7 +772,8 @@ export class AIController {
       let need = total;
       for (const q of this.helpers(myPlanets, p, 900)) {
         if (need <= 0) break;
-        if ((dist(q, p) - p.atmosphereRadius) / CONFIG.unit.speed > deadline) break;
+        // 궤도에서 떼어 보낸 증원은 보폭을 맞춰 함께 닿는다 (합류): 가장 먼 병력이 출발 가속을 마치고 대기권에 들어설 때
+        if (orbitEta(q, p, 'join').last > deadline) break;
         const n = Math.min(this.spare(pool, q), need);
         if (n <= 0) continue;
         this.order(world, this.take(pool, q, n), { kind: 'planet', planetId: p.id, formation: 'cluster' });
@@ -680,7 +830,7 @@ export class AIController {
         if (force.length >= need) break;
         force.push(...this.take(pool, s, Math.min(this.spare(pool, s), need - force.length)));
       }
-      const aim = intercept(a, dist(srcs[0], a) / CONFIG.unit.speed);
+      const aim = intercept(a, dist(srcs[0], a) / SPEED + MOTION.startLag);
       this.order(world, force, { kind: 'move', x: aim.x, y: aim.y, formation: 'cluster' });
       this.ops.push(this.newOp('hunt', -1, force, world.time, 'assault', a.ids));
       return; // 한 번에 하나: 여러 무리를 쫓다 본진이 비지 않게
@@ -706,7 +856,8 @@ export class AIController {
 
     const targeted = new Set(this.ops.filter((o) => o.kind !== 'hunt').map((o) => o.target));
     const weakest = rivals.length >= 2 ? rivals.reduce((a, b) => (world.planetCount[b.id] < world.planetCount[a.id] ? b : a)).id : -1;
-    const travel = (s: Planet, t: Planet) => Math.max(0, dist(s, t) - t.atmosphereRadius) / CONFIG.unit.speed;
+    /** s 궤도의 병력이 t 대기권에 닿는 평균 시각 (돌파: 병력마다 최고 속도 + 출발 가속, groupEta 의 bulk 와 같다) */
+    const travel = (s: Planet, t: Planet) => Math.max(0, dist(s, t) - t.atmosphereRadius) / SPEED + MOTION.startLag;
 
     const valueOf = (t: Planet) => {
       if (t.owner === NEUTRAL) return t.production * 10;
@@ -800,7 +951,7 @@ export class AIController {
       if (near.reduce((s, p) => s + this.spare(pool, p), 0) < send) continue;
       // 대기: 생산을 몇 초 더 모아 보내는 편이 (기다린 시간까지 쳐도) 싸면 지금은 보내지 않는다
       if (plan.better()) continue;
-      this.launch(world, pool, t, near, send, least, choice.tactic === 'siege', travel);
+      this.launch(world, pool, t, near, send, least, choice.tactic === 'siege');
       active++;
       launched++;
     }
@@ -814,22 +965,21 @@ export class AIController {
    */
   private reinforcementsFor(world: World, t: Planet, armies: Army[], arrival: number): Reinforcement[] {
     const w = this.profile.reinforceWeight;
-    const speed = CONFIG.unit.speed;
     const depart = Math.max(0, arrival - ENEMY_NOTICE) + ENEMY_REACTION;
     const list: Reinforcement[] = [];
     for (const q of world.planets) {
       if (q === t || q.owner !== t.owner) continue;
-      const d = dist(q, t);
-      if (d > AI_REINFORCE_RADIUS) continue;
+      if (dist(q, t) > AI_REINFORCE_RADIUS) continue;
       const n = q.orbitCount[t.owner] * (1 - REINFORCE_KEEP) * w;
-      if (n >= 1) list.push({ count: n, eta: depart + (d - t.atmosphereRadius) / speed });
+      // 궤도에서 떼어 보낸 증원은 보폭을 맞춰 함께 닿는다 (합류)
+      if (n >= 1) list.push({ count: n, eta: depart + orbitEta(q, t, 'join').bulk });
     }
     for (const a of armies) {
       if (a.faction !== t.owner) continue;
       const gap = dist(a, t) - t.atmosphereRadius;
       // 대기권 바로 곁의 무리는 이미 수비대(hostilesNear)로 셌다
       if (gap < 10 || gap > AI_REINFORCE_RADIUS) continue;
-      list.push({ count: a.count * w, eta: depart + gap / speed });
+      list.push({ count: a.count * w, eta: depart + gap / SPEED + MOTION.startLag });
     }
     return list;
   }
@@ -838,19 +988,13 @@ export class AIController {
    * 공격 개시. 가까운 행성부터 병력을 떼고,
    * synchronize: 가까운 무리는 늦게 출발시켜 모두 같은 시각에 도착하게 한다 (먼저 닿은 무리가 각개 격파당하지 않게).
    * feints: 다른 진영 행성이면 그 이웃 행성(같은 주인)에 견제 병력을 먼저 보내 수비대 · 증원을 끌어낸 뒤 본대가 닿는다.
+   * 도착 시각은 무리마다 실제 병력 위치로 잰다 (groupEta): 돌파는 병력마다 최고 속도라 궤도 앞쪽 병력이 먼저 닿고,
+   * 포위 · 견제는 고리 끝 슬롯에 보폭을 맞춰 한꺼번에 늦게 닿는다.
    */
-  private launch(
-    world: World,
-    pool: Pool,
-    t: Planet,
-    near: Planet[],
-    send: number,
-    least: number,
-    siege: boolean,
-    travel: (s: Planet, t: Planet) => number,
-  ): void {
+  private launch(world: World, pool: Pool, t: Planet, near: Planet[], send: number, least: number, siege: boolean): void {
     const prof = this.profile;
     const now = world.time;
+    const kind: MoveKind = siege ? 'siege' : 'dive';
 
     // 견제: 같은 주인의 가장 가까운 이웃 행성. 병력은 본대가 최소 병력(least)을 넘겨 가져가는 몫에서 떼어 낸다
     const decoy =
@@ -863,47 +1007,46 @@ export class AIController {
     const surplus = near.reduce((s, p) => s + this.spare(pool, p), 0) - send;
     const main = decoy && surplus < fakeSize ? Math.max(least, send - (fakeSize - surplus)) : send;
 
-    const groups: { units: Unit[]; eta: number }[] = [];
+    const groups: { units: Unit[]; eta: Eta }[] = [];
     let count = 0;
     for (const s of near) {
       if (count >= main) break;
       const n = Math.min(this.spare(pool, s), main - count);
       if (n <= 0) continue;
-      groups.push({ units: this.take(pool, s, n), eta: travel(s, t) });
+      const units = this.take(pool, s, n);
+      groups.push({ units, eta: groupEta(units, t, kind) });
       count += n;
     }
     const all = groups.flatMap((g) => g.units);
     const op = this.newOp('attack', t.id, all, now, siege ? 'stage' : 'assault');
     const formation = siege ? 'spread' : 'cluster';
-    let arrive = Math.max(...groups.map((g) => g.eta));
+    // 동시 도착은 무리마다 평균 도착 시각(bulk)을 맞춘다
+    let arrive = Math.max(...groups.map((g) => g.eta.bulk));
 
     if (decoy) {
-      const src = near.filter((s) => this.spare(pool, s) > 0).sort((a, b) => travel(a, decoy) - travel(b, decoy));
+      const src = near.filter((s) => this.spare(pool, s) > 0).sort((a, b) => dist(a, decoy) - dist(b, decoy));
       if (src.reduce((s, p) => s + this.spare(pool, p), 0) >= fakeSize) {
         const fake: Unit[] = [];
         for (const s of src) {
           if (fake.length >= fakeSize) break;
           fake.push(...this.take(pool, s, Math.min(this.spare(pool, s), fakeSize - fake.length)));
         }
-        // 궤도 위 실제 출발 위치를 쓴다. 산개 무리는 뒤쪽 병력의 보폭에 맞춰 가므로
-        // 행성 중심 간 거리만 쓰면 견제의 도착을 실제보다 빨리 잡는다.
-        const fakeEta = Math.max(...fake.map((u) => Math.max(0, dist(u, decoy) - decoy.atmosphereRadius) / CONFIG.unit.speed));
-        // 포위로 대기권 밖에 서서 오래 버티며 시선을 끈다. 본대는 그보다 FEINT_LEAD 초 늦게 닿는다
+        // 포위로 대기권 밖에 서서 오래 버티며 시선을 끈다. 본대의 첫 병력이 견제 무리의 첫 병력보다 FEINT_LEAD 초 늦게 닿게:
+        // 돌파하는 본대는 평균보다 (궤도 앞쪽 병력이) 일찍 닿으니 그 차이만큼 더 늦춘다
+        const fakeEta = groupEta(fake, decoy, 'siege');
         this.order(world, fake, { kind: 'planet', planetId: decoy.id, formation: 'spread' });
         const feint = this.newOp('feint', decoy.id, fake, now, 'stage');
         feint.partner = op;
         op.partner = feint;
         this.ops.push(feint);
-        arrive = Math.max(arrive, fakeEta + FEINT_LEAD);
+        for (const g of groups) arrive = Math.max(arrive, fakeEta.first + FEINT_LEAD + (g.eta.bulk - g.eta.first));
       }
     }
 
     for (const g of groups) {
-      // 돌파 무리는 보폭을 맞추지 않아 앞쪽 병력이 먼저 닿는다. 견제와의 간격은
-      // 본대 선두 기준으로 확보해야 먼저 도착한 본대가 견제보다 앞서 싸우지 않는다.
-      const eta = op.partner ? Math.min(...g.units.map((u) => Math.max(0, dist(u, t) - t.atmosphereRadius) / CONFIG.unit.speed)) : g.eta;
-      const delay = prof.synchronize || op.partner ? arrive - eta : 0;
-      if (delay < prof.thinkInterval) this.order(world, g.units, { kind: 'planet', planetId: t.id, formation });
+      const delay = prof.synchronize || op.partner ? arrive - g.eta.bulk : 0;
+      // 늦춘 무리는 판단 때에만 출발시킬 수 있다: 가장 가까운 판단 시각에 맞춘다 (반 주기 안이면 지금)
+      if (delay < prof.thinkInterval / 2) this.order(world, g.units, { kind: 'planet', planetId: t.id, formation });
       else op.pending.push({ ids: g.units.map((u) => u.id), at: now + delay });
     }
     this.ops.push(op);
@@ -915,7 +1058,9 @@ export class AIController {
       target,
       units: new Set(units.map((u) => u.id)),
       phase,
+      staged: false,
       startedAt: now,
+      settledAt: Infinity,
       initial: units.length,
       pending: [],
       prey,
@@ -938,7 +1083,8 @@ export class AIController {
       // 출발을 기다리던 무리
       op.pending = op.pending.filter((g) => {
         g.ids = g.ids.filter((id) => op.units.has(id));
-        if (g.at > now) return true;
+        // 판단 주기 단위로만 출발시킬 수 있다: 가장 가까운 판단에 (다음 판단이 더 가까우면 그때) 출발
+        if (g.at > now + this.profile.thinkInterval / 2) return true;
         if (op.kind === 'attack') {
           const formation = op.phase === 'stage' ? 'spread' : 'cluster';
           this.order(world, g.ids, { kind: 'planet', planetId: op.target, formation });
@@ -964,27 +1110,56 @@ export class AIController {
 
       if (elapsed > ASSAULT_TIMEOUT) return end(op, true);
       if (this.profile.retreatEarly) {
-        // 수비대 사거리까지 접근하면 재평가한다. 대다수가 대기권 안에 들어갈 때까지
-        // 기다리면 증원이 온 것을 보고도 강하해, 선회·가속하며 빠져나올 병력까지 잃는다.
-        if (waiting === 0 && elapsed > 3) {
-          let inside = 0, approaching = 0;
-          for (const id of op.units) {
-            const u = world.getUnit(id)!;
-            if (u.inPlanet === t.id) inside++;
-            if (dist(u, t) <= t.atmosphereRadius + CONFIG.unit.range) approaching++;
-          }
-          if (approaching >= alive * 0.6) {
-            const defenders = this.hostilesNear(world, t, 0, true);
-            const est = estimateBattle({ ...planetBattle(t, alive * RETREAT_SLACK, defenders, 0), engaged: inside >= alive * 0.6 }, 'dive');
-            op.doubt = !est.success && t.defense > t.maxDefense * 0.1 ? op.doubt + 1 : 0;
-            if (op.doubt >= DOUBT_LIMIT) return end(op, true);
-          }
-        }
+        if (waiting === 0 && !this.assessAssault(world, op, t, alive)) return end(op, true);
       } else if (alive < op.initial * 0.25 && t.defense > alive * 3) {
         return end(op, true);
       }
       return true;
     });
+  }
+
+  /**
+   * 돌파 재평가 (retreatEarly): 지금 그대로 계속 돌파하면 먹을 수 있나. 대기권에 들어서기 전, 다가가는 동안부터 본다.
+   * 지는 싸움이면 물리는데, 물리는 값은 늦을수록 커진다: 최고 속도로 다가가던 병력은 U 턴하는 동안(MOTION.turnLag)
+   * 앞으로 더 나가며(turnReach) 수비대 사격 띠(FIRE_GAP) 안에 머물고, 이미 들어간 병력은 판단 한 번마다 맞는다.
+   * 그래서 한 번 더 확인하고(DOUBT_LIMIT) 물리되, 다음 판단까지 기다리는 동안 잃을 수가 병력의 DELAY_LOSS_SHARE 를 넘으면
+   * 첫 추정에 바로 물린다 (사격 띠 밖에서 돌아서면 한 기도 잃지 않는다). false = 물린다
+   */
+  private assessAssault(world: World, op: Operation, t: Planet, alive: number): boolean {
+    const atm = t.atmosphereRadius;
+    const think = this.profile.thinkInterval;
+    const outside: Unit[] = [];
+    let inside = 0;
+    /** 다음 판단 전에 사격 띠 안에 있게 될 병력 · 그중 가장 앞선 병력이 띠까지 남은 거리 */
+    let exposed = 0;
+    let front = Infinity;
+    for (const id of op.units) {
+      const u = world.getUnit(id)!;
+      if (u.inPlanet === t.id) {
+        inside++;
+        exposed++;
+        front = -Infinity;
+        continue;
+      }
+      outside.push(u);
+      const gap = dist(u, t) - atm - FIRE_GAP;
+      front = Math.min(front, gap);
+      if (gap - SPEED * think - MOTION.turnReach < 0) exposed++;
+    }
+    const engaged = op.staged || inside >= alive * 0.6;
+    const defenders = this.hostilesNear(world, t, engaged ? 0 : 10, true);
+    // 아직 다가가는 중이면 남은 병력이 평균적으로 닿는 시각까지 수비측이 생산 · 회복하고, 들어가며 접근 교전을 치른다
+    const travel = engaged || outside.length === 0 ? 0 : groupEta(outside, t, 'dive').bulk;
+    const est = estimateBattle({ ...planetBattle(t, alive * RETREAT_SLACK, defenders, travel), engaged }, 'dive');
+    if (est.success || t.defense <= t.maxDefense * 0.1) {
+      op.doubt = 0;
+      return true;
+    }
+    op.doubt++;
+    // 기다리는 값: 사격 띠 안의 병력이 다음 판단까지 맞는 수 (돌파 모형의 사거리 안 수비대 비율로 초당 피해)
+    const inBand = Math.max(0, Math.min(think, think - (front - MOTION.turnReach) / SPEED));
+    const delayLoss = Math.min(exposed, ((defenders * diveExposure(defenders, t.radius)) / CONFIG.unit.hp) * inBand);
+    return op.doubt < DOUBT_LIMIT && delayLoss < Math.max(1, alive * DELAY_LOSS_SHARE);
   }
 
   /** 포위 중: 지금 돌파로 바꾸는 게 싸면 돌파, 둘 다 지는 싸움이면 귀환. false = 작전 종료(귀환) */
@@ -993,9 +1168,13 @@ export class AIController {
     let holding = 0;
     for (const id of op.units) if (world.getUnit(id)!.state === 'hold') holding++;
     const settled = waiting === 0 && holding > (alive - waiting) * 0.7;
+    if (settled && op.settledAt === Infinity) op.settledAt = world.time;
+    /** 고리가 선 뒤 지난 시간 (보폭을 맞춘 포위 무리는 고리 끝 슬롯에 맞춰 한꺼번에 서므로 이동 시간이 작전마다 다르다) */
+    const sieging = Math.max(0, world.time - op.settledAt);
     const dive = () => {
       this.order(world, op.units, { kind: 'planet', planetId: t.id, formation: 'cluster' });
       op.phase = 'assault';
+      op.staged = true;
       op.startedAt = world.time;
       op.doubt = 0;
       return true;
@@ -1006,6 +1185,7 @@ export class AIController {
       if ((holding > alive * 0.7 && defenders <= alive * 0.35) || elapsed > BATTLE_MODEL.siegeLimit) return dive();
       return true;
     }
+    // 고리가 끝내 서지 않으면 (밀려나거나 흩어져) 출발 뒤 일정 시간이 지나 돌파
     if (!settled) return elapsed > BATTLE_MODEL.siegeLimit + 15 ? dive() : true;
     const inp = { ...planetBattle(t, alive, defenders, 0), engaged: true };
     const now = chooseTactic(inp, true, TIME_WEIGHT);
@@ -1014,7 +1194,7 @@ export class AIController {
       return op.doubt < DOUBT_LIMIT;
     }
     op.doubt = 0;
-    if (now.tactic === 'dive' || defenders <= Math.max(2, alive * BATTLE_MODEL.siegeSwitch) || elapsed > BATTLE_MODEL.siegeLimit) return dive();
+    if (now.tactic === 'dive' || defenders <= Math.max(2, alive * BATTLE_MODEL.siegeSwitch) || sieging > BATTLE_MODEL.siegeLimit) return dive();
     return true;
   }
 
@@ -1033,7 +1213,7 @@ export class AIController {
     // 적 행성 대기권 곁으로 도망치면 그만둔다 (수비대 사거리로 끌려 들어가지 않게)
     if (world.planets.some((p) => p.owner !== this.faction && dist(p, army) < p.atmosphereRadius + 30)) return false;
     const first = world.getUnit(op.units.values().next().value!)!;
-    const aim = intercept(army, dist(first, army) / CONFIG.unit.speed);
+    const aim = intercept(army, dist(first, army) / SPEED);
     this.order(world, op.units, { kind: 'move', x: aim.x, y: aim.y, formation: 'cluster' });
     return true;
   }

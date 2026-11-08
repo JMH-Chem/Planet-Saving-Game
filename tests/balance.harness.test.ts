@@ -14,7 +14,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { CONFIG, type Difficulty, type PlanetSize } from '../src/config';
-import { AIController, chooseTactic, estimateBattle, type Tactic } from '../src/sim/ai';
+import { AIController, MOTION, chooseTactic, estimateBattle, type Tactic } from '../src/sim/ai';
 import { Match } from '../src/sim/match';
 import { NEUTRAL, PLAYER, type Planet, type Unit } from '../src/sim/types';
 import { World } from '../src/sim/world';
@@ -279,7 +279,8 @@ describe.skipIf(!on('estimator'))('밸런스 · 전투 추정기 vs 실제', () 
                 const inp = {
                   attackers: N, defenders: G, radius: spec.radius, defense: spec.maxDefense * defFrac, maxDefense: spec.maxDefense,
                   regen: spec.maxDefense * CONFIG.regenRate, production: owner === 0 ? 0 : spec.production, capacity: spec.capacity,
-                  travel: Math.max(0, (distance - spec.radius - CONFIG.atmosphere) / CONFIG.unit.speed),
+                  // 멈춰 선 무리가 출발하므로 가속 지연(MOTION.startLag)까지 (AI 가 추정기에 넣는 이동 시간과 같게)
+                  travel: Math.max(0, (distance - spec.radius - CONFIG.atmosphere) / CONFIG.unit.speed) + MOTION.startLag,
                 };
                 const lambda = 0.3 + inp.production;
                 const real = { dive: realBattle(size, owner, N, G, defFrac, 'dive', distance), siege: realBattle(size, owner, N, G, defFrac, 'siege', distance) };

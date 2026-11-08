@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { AI_PROFILES, CONFIG, type AIProfile, type PlanetSize } from '../src/config';
 import {
   AIController,
+  MOTION,
   chooseTactic,
   estimateBattle,
+  groupEta,
   planetBattle,
   projectArmy,
   trackArmies,
   type BattleInput,
+  type MoveKind,
   type Tactic,
 } from '../src/sim/ai';
 import { Match } from '../src/sim/match';
@@ -84,7 +87,7 @@ function inputFor(size: PlanetSize, owner: 0 | 2, N: number, G: number): BattleI
   return {
     attackers: N, defenders: G, radius: spec.radius, defense: spec.maxDefense, maxDefense: spec.maxDefense,
     regen: spec.maxDefense * CONFIG.regenRate, production: owner === 0 ? 0 : spec.production, capacity: spec.capacity,
-    travel: (140 - spec.radius - CONFIG.atmosphere) / CONFIG.unit.speed,
+    travel: (140 - spec.radius - CONFIG.atmosphere) / CONFIG.unit.speed + MOTION.startLag,
   };
 }
 
@@ -152,6 +155,80 @@ describe('전투 추정기', () => {
     const n = planetBattle(w.planets[0], 30, 4, 2);
     expect(n).toMatchObject({ attackers: 30, defenders: 4, production: 0, travel: 2, regen: CONFIG.planet.medium.maxDefense * CONFIG.regenRate });
     expect(planetBattle(w.planets[1], 30, 0, 0).production).toBe(CONFIG.planet.large.production);
+  });
+});
+
+// ───────────────────────────── 이동 모형 ─────────────────────────────
+
+describe('이동 모형 (AI 의 도착 시각)', () => {
+  /** src 궤도의 병력 n 기를 d 떨어진 dst 로 보내 (돌파 · 포위 · 합류) 실제 도착 시각과 groupEta 를 견준다 */
+  const trip = (kind: MoveKind, n: number, d: number, src: PlanetSize, dst: PlanetSize) => {
+    const w = new World({
+      width: 1600, height: 900, seed: n + d, factionCount: 2, aiFactions: [],
+      planets: [
+        { x: 300, y: 450, size: src, owner: 1, garrison: n },
+        { x: 300 + d, y: 450, size: dst, owner: kind === 'join' ? 1 : 2, garrison: 0 },
+        { x: 1590, y: 10, size: 'small', owner: 2, garrison: 0 },
+      ],
+    });
+    for (let i = 0; i < 45; i++) w.step(DT); // 궤도에 자리 잡기
+    const t = w.planets[1];
+    const units = w.units.filter((u) => u.faction === 1 && u.planet === 0);
+    const eta = groupEta(units, t, kind);
+    const t0 = w.time;
+    w.enqueue({ faction: 1, unitIds: units.map((u) => u.id), order: { kind: 'planet', planetId: 1, formation: kind === 'siege' ? 'spread' : 'cluster' } });
+    // 돌파 · 합류는 대기권에 들어선 때, 포위는 고리 슬롯에 선 때
+    const at = new Map<number, number>();
+    while (at.size < units.length && w.time - t0 < 30) {
+      w.step(DT);
+      for (const u of units) {
+        if (at.has(u.id)) continue;
+        if (kind === 'siege' ? u.state === 'hold' : dist(u, t) <= t.atmosphereRadius) at.set(u.id, w.time - t0);
+      }
+    }
+    const times = [...at.values()].sort((a, b) => a - b);
+    return { eta, first: times[0], bulk: times.reduce((s, x) => s + x, 0) / times.length, naive: (d - t.atmosphereRadius) / CONFIG.unit.speed };
+  };
+
+  it('돌파는 병력마다 최고 속도, 포위 · 합류는 보폭을 맞춰 함께: groupEta 가 실제 도착과 맞는다', () => {
+    for (const [n, d] of [[12, 300], [40, 600]]) {
+      const dive = trip('dive', n, d, 'large', 'medium');
+      // 첫 병력은 궤도 앞쪽에서 출발해 '거리 / 속도' 보다 거의 1초 일찍 닿는다 (돌파는 보폭을 맞추지 않는다)
+      expect(dive.naive - dive.first).toBeGreaterThan(0.6);
+      expect(Math.abs(dive.eta.first - dive.first)).toBeLessThan(0.25);
+      expect(Math.abs(dive.eta.bulk - dive.bulk)).toBeLessThan(0.25);
+      const join = trip('join', n, d, 'large', 'medium');
+      expect(Math.abs(join.eta.first - join.first)).toBeLessThan(0.25);
+      expect(Math.abs(join.eta.bulk - join.bulk)).toBeLessThan(0.4);
+      const siege = trip('siege', n, d, 'large', 'medium');
+      // 포위 무리는 고리 끝 슬롯에 맞춰 늦게 선다
+      expect(siege.first).toBeGreaterThan(siege.naive);
+      expect(Math.abs(siege.eta.bulk - siege.bulk)).toBeLessThan(0.6);
+      expect(Math.abs(siege.eta.bulk - siege.bulk)).toBeLessThan(Math.abs(siege.naive - siege.bulk));
+    }
+  });
+
+  it('출발 가속 · U 턴 지연이 조향과 맞는다 (MOTION)', () => {
+    const w = makeWorld([
+      { x: 100, y: 100, size: 'small', owner: 1, garrison: 0 },
+      { x: 1150, y: 650, size: 'small', owner: 2, garrison: 0 },
+    ]);
+    const [u] = squad(w, 1, 1, 200, 400);
+    const go = (x: number) => w.enqueue({ faction: 1, unitIds: [u.id], order: { kind: 'move', x, y: 400, formation: 'cluster' } });
+    go(1100);
+    for (let i = 0; i < 60; i++) w.step(DT);
+    // 2초 동안 간 거리로 본 지연 = 정지에서 출발한 가속분
+    expect(Math.abs(2 - (u.x - 200) / CONFIG.unit.speed - MOTION.startLag)).toBeLessThan(0.05);
+    const x0 = u.x;
+    let reach = 0;
+    go(100);
+    for (let i = 0; i < 60; i++) {
+      w.step(DT);
+      reach = Math.max(reach, u.x - x0);
+    }
+    // 반대로 돌아서는 데 즉시 반전보다 turnLag 늦고, 그사이 turnReach 남짓 더 나간다
+    expect(Math.abs(2 - (x0 - u.x) / CONFIG.unit.speed - MOTION.turnLag)).toBeLessThan(0.08);
+    expect(Math.abs(reach - MOTION.turnReach)).toBeLessThan(2);
   });
 });
 
@@ -233,6 +310,28 @@ describe('AI 행동', () => {
     expect(target.owner).toBe(2);
     expect(survivors.length).toBeGreaterThanOrEqual(force.length * 0.4);
     expect(survivors.every((id) => dist(w.getUnit(id)!, home) < home.atmosphereRadius + 5 || w.getUnit(id)!.planet === home.id)).toBe(true);
+  });
+
+  it('다가가는 동안 수비대가 불어나면 대기권에 들어서기 전에 돌아선다 (들어간 뒤의 U 턴은 사격 띠 안에서 맞는다)', () => {
+    const w = makeWorld([
+      { x: 150, y: 350, size: 'large', owner: 1, garrison: 70 },
+      { x: 620, y: 350, size: 'medium', owner: 2, garrison: 6 },
+      { x: 1150, y: 650, size: 'small', owner: 2, garrison: 10 },
+    ]);
+    const target = w.planets[1];
+    const ai = new AIController(1, 'hard', 0.5);
+    // 공격 무리의 앞줄이 대기권 100px 앞에 왔을 때 수비대 90 기가 생긴다
+    const front = () => Math.min(...w.units.filter((u) => u.faction === 1 && u.state === 'move').map((u) => dist(u, target) - target.atmosphereRadius));
+    run(w, [ai], 30, () => front() < 100);
+    const force = w.units.filter((u) => u.faction === 1 && u.state === 'move').map((u) => u.id);
+    expect(force.length).toBeGreaterThanOrEqual(30);
+    for (let i = 0; i < 90; i++) w.spawnUnit(2, target, false);
+    let entered = 0;
+    run(w, [ai], 15, () => {
+      for (const id of force) if (w.getUnit(id)?.inPlanet === target.id) entered++;
+    });
+    expect(entered).toBe(0);
+    expect(force.filter((id) => w.getUnit(id)).length).toBeGreaterThanOrEqual(force.length * 0.9);
   });
 
   it('어려움: 여러 행성에서 모은 병력이 거의 같은 시각에 닿는다 (가까운 무리를 늦게 출발)', () => {
