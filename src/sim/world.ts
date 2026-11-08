@@ -117,6 +117,8 @@ export class World {
   private readonly pack: PackGrid;
   /** 이번 틱 steer 가 쓰는 cos(turnRate × dt) */
   private straightCos = 1;
+  /** refreshCounts 의 대기권 판정용 행성 후보 격자 (행성 배치가 바뀌면 다시 만든다) */
+  private lookup: PlanetLookup | null = null;
 
   constructor(init: WorldInit) {
     this.width = init.width;
@@ -546,10 +548,17 @@ export class World {
   private detour(u: Unit): { x: number; y: number } | null {
     let best: Planet | null = null;
     let bestT = Infinity;
+    // 빠른 배제: 길(선분)의 가장 가까운 점은 선분의 경계 상자 안에 있으므로, 행성 중심이 상자에서 (ra + 1) 넘게
+    // 떨어져 있으면 아래 판정(가장 가까운 점까지 < clear ≤ ra)을 통과할 수 없다. 1px 은 반올림 여유.
+    // 좌표가 NaN 이면 비교가 모두 거짓이라 배제하지 않고 원래 판정으로 넘어간다
+    const bx0 = Math.min(u.x, u.tx), bx1 = Math.max(u.x, u.tx);
+    const by0 = Math.min(u.y, u.ty), by1 = Math.max(u.y, u.ty);
     for (const p of this.planets) {
       if (p.owner === u.faction) continue;
       const atm = p.atmosphereRadius;
       const ra = atm + 3;
+      const reach = ra + 1;
+      if (p.x < bx0 - reach || p.x > bx1 + reach || p.y < by0 - reach || p.y > by1 + reach) continue;
       const ux = u.x - p.x, uy = u.y - p.y;
       const tx = u.tx - p.x, ty = u.ty - p.y;
       const ru2 = ux * ux + uy * uy, rt2 = tx * tx + ty * ty;
@@ -640,7 +649,7 @@ export class World {
       }
 
       // 그 외: 사거리 안 가장 가까운 적 병력과 교전. hp > 0 = 이번 틱에 예약된 피해를 빼고도 살아 있는 적
-      const target = this.grid.nearest(u.x, u.y, unit.range, (v) => v.faction !== u.faction && v.hp > 0);
+      const target = this.grid.nearestEnemy(u.x, u.y, unit.range, u.faction);
       if (!target) {
         u.cooldown = 0.2;
         continue;
@@ -727,30 +736,57 @@ export class World {
   // ───────────────────────────── 집계 ─────────────────────────────
 
   private refreshCounts(): void {
-    for (const p of this.planets) {
+    const planets = this.planets;
+    for (const p of planets) {
       p.orbitCount.fill(0);
       p.presence.fill(0);
     }
     this.planetCount.fill(0);
     this.unitCount.fill(0);
-    for (const p of this.planets) this.planetCount[p.owner]++;
+    for (const p of planets) this.planetCount[p.owner]++;
 
+    // 대기권 판정은 병력이 든 칸의 후보 행성만 본다 (후보는 번호 순이라 '가장 작은 번호의 행성' 이 그대로 뽑힌다)
+    const look = this.planetLookup();
+    const { start, list } = look;
     for (const u of this.units) {
       this.unitCount[u.faction]++;
       u.inPlanet = -1;
-      for (const p of this.planets) {
-        const dx = p.x - u.x, dy = p.y - u.y;
-        if (dx * dx + dy * dy <= p.atmosphereRadius * p.atmosphereRadius) {
-          u.inPlanet = p.id;
-          p.presence[u.faction]++;
-          if (u.isolated && p.owner === u.faction) u.isolated = false;
-          break;
+      const ux = u.x, uy = u.y;
+      const c = look.cell(ux, uy);
+      if (c >= 0) {
+        for (let k = start[c], end = start[c + 1]; k < end; k++) {
+          const p = planets[list[k]];
+          const dx = p.x - ux, dy = p.y - uy;
+          if (dx * dx + dy * dy <= p.atmosphereRadius * p.atmosphereRadius) {
+            u.inPlanet = p.id;
+            p.presence[u.faction]++;
+            if (u.isolated && p.owner === u.faction) u.isolated = false;
+            break;
+          }
+        }
+      } else {
+        // 좌표가 NaN 인 병력: 어느 대기권에도 들지 않는다 (예전 전수 검사와 같은 결과)
+        for (const p of planets) {
+          const dx = p.x - ux, dy = p.y - uy;
+          if (dx * dx + dy * dy <= p.atmosphereRadius * p.atmosphereRadius) {
+            u.inPlanet = p.id;
+            p.presence[u.faction]++;
+            if (u.isolated && p.owner === u.faction) u.isolated = false;
+            break;
+          }
         }
       }
-      if (u.state === 'orbit') this.planets[u.planet].orbitCount[u.faction]++;
+      if (u.state === 'orbit') planets[u.planet].orbitCount[u.faction]++;
       // 행성을 모두 잃은 진영의 병력은 전원 고립.
       if (this.planetCount[u.faction] === 0 && !this.factions[u.faction].invader) u.isolated = true;
     }
+  }
+
+  /** 행성 배치(위치 · 대기권 반경 · 수)가 바뀌었을 때만 다시 만든다 */
+  private planetLookup(): PlanetLookup {
+    const look = this.lookup;
+    if (look && look.matches(this.planets)) return look;
+    return (this.lookup = new PlanetLookup(this.width, this.height, this.planets));
   }
 
   private updateFactions(): void {
@@ -897,5 +933,83 @@ class PackGrid {
       }
     }
     return any;
+  }
+}
+
+/**
+ * 대기권 판정용 거친 격자: 칸마다 그 칸(경계 칸은 맵 밖까지 늘린 영역)에 대기권이 조금이라도 걸칠 수 있는 행성 번호를
+ * 작은 번호부터 담는다 (CSR: start[c] ~ start[c+1]). 병력마다 모든 행성을 훑던 O(병력 × 행성) 판정을 칸의 후보 몇 개로 줄인다.
+ * 판정식 자체는 그대로이고 후보가 번호 순이라, 첫 번째로 걸리는 행성은 전수 검사와 같다.
+ * 걸칠 수 있는지는 여유 MARGIN 을 두고 넉넉하게 본다 (칸 경계의 반올림 · 판정식의 반올림을 덮는다).
+ */
+class PlanetLookup {
+  private static readonly MARGIN = 2;
+  readonly start: Int32Array;
+  readonly list: Int32Array;
+  private readonly cols: number;
+  private readonly rows: number;
+  private readonly size: number;
+  /** 만들 때의 행성 배치 (x, y, atmosphereRadius) */
+  private readonly sig: Float64Array;
+
+  constructor(width: number, height: number, planets: readonly Planet[]) {
+    const size = 64;
+    this.size = size;
+    this.cols = Math.max(1, Math.ceil(width / size));
+    this.rows = Math.max(1, Math.ceil(height / size));
+    const { cols, rows } = this;
+    this.sig = new Float64Array(planets.length * 3);
+    planets.forEach((p, i) => {
+      this.sig[i * 3] = p.x;
+      this.sig[i * 3 + 1] = p.y;
+      this.sig[i * 3 + 2] = p.atmosphereRadius;
+    });
+    const cells: number[][] = Array.from({ length: cols * rows }, () => []);
+    planets.forEach((p, i) => {
+      const r = p.atmosphereRadius + PlanetLookup.MARGIN;
+      for (let cy = 0; cy < rows; cy++) {
+        const y0 = cy === 0 ? -Infinity : cy * size;
+        const y1 = cy === rows - 1 ? Infinity : (cy + 1) * size;
+        const ny = Math.max(y0, Math.min(y1, p.y));
+        const ddy = ny - p.y;
+        for (let cx = 0; cx < cols; cx++) {
+          const x0 = cx === 0 ? -Infinity : cx * size;
+          const x1 = cx === cols - 1 ? Infinity : (cx + 1) * size;
+          const nx = Math.max(x0, Math.min(x1, p.x));
+          const ddx = nx - p.x;
+          // 판정식이 비교하는 값이 유한하지 않은 행성(좌표 · 반경이 NaN 등)은 어느 칸에든 넣어 전수 검사와 같게 둔다
+          if (!(ddx * ddx + ddy * ddy <= r * r) && Number.isFinite(r) && Number.isFinite(p.x) && Number.isFinite(p.y)) continue;
+          cells[cy * cols + cx].push(i);
+        }
+      }
+    });
+    this.start = new Int32Array(cols * rows + 1);
+    let total = 0;
+    for (let c = 0; c < cells.length; c++) {
+      this.start[c] = total;
+      total += cells[c].length;
+    }
+    this.start[cells.length] = total;
+    this.list = new Int32Array(total);
+    let k = 0;
+    for (const c of cells) for (const i of c) this.list[k++] = i;
+  }
+
+  /** (x, y) 가 드는 칸. 좌표가 NaN 이면 -1 */
+  cell(x: number, y: number): number {
+    const cx = Math.min(this.cols - 1, Math.max(0, Math.floor(x / this.size)));
+    const cy = Math.min(this.rows - 1, Math.max(0, Math.floor(y / this.size)));
+    const c = cy * this.cols + cx;
+    return c >= 0 ? c : -1;
+  }
+
+  matches(planets: readonly Planet[]): boolean {
+    const sig = this.sig;
+    if (sig.length !== planets.length * 3) return false;
+    for (let i = 0; i < planets.length; i++) {
+      const p = planets[i];
+      if (sig[i * 3] !== p.x || sig[i * 3 + 1] !== p.y || sig[i * 3 + 2] !== p.atmosphereRadius) return false;
+    }
+    return true;
   }
 }
