@@ -8,8 +8,9 @@ import { drawSprite, glowSprite, makeCanvas, mixHex, softSprite, withAlpha } fro
 // 행성: 대기권(게임 규칙상 '안 = 강하, 밖 = 교전' 경계라 늘 또렷하게) · 표면 · 방어도 고리 · 생산 진행 · 이름표.
 // 소유 진영은 표면 색이 아니라 바깥 고리 · 대기 광륜 · 가장자리 빛 · 밤쪽 도시 불빛으로 알린다 (표면은 자연스러운 행성 그대로).
 //
-// 대기 · 광륜 · 표면 · 구름 · 조명 · 도시 불빛 · 방어도 고리는 행성마다 화면 해상도 그대로의 캔버스 한 장에 합쳐 두고
-// (자전 · 구름이 0.6px 이상 밀렸거나, 확대 배율 · 보이는 색 · 방어도 · 불빛 수가 바뀔 때만 다시 그림) 매 프레임 한 번만 찍는다.
+// 대기 · 광륜 · 표면 · 구름 · 조명 · 도시 불빛 · 방어도 고리는 행성마다 화면 해상도(크게 확대하면 MAX_CACHE_SCALE 까지)의 캔버스 한 장에 합쳐 두고
+// (자전 · 구름이 0.6px 이상 밀렸거나, 확대 배율 · 보이는 색 · 방어도 · 불빛 수가 바뀔 때만 다시 그림) 매 프레임 한 번만 찍는다
+// (크게 확대했을 때 화면 밖으로 절반 넘게 나간 행성만 보이는 부분을 직접 그린다: DIRECT_SCALE).
 // 축소 · 패턴 · 점선이 섞인 그리기는 GPU 가 없거나 약한 기기에서 특히 비싸기 때문이다.
 
 const NEUTRAL_RING = '#b8c4d6';
@@ -23,8 +24,19 @@ const FIRE = '#ff7a2e';
 const SEGMENTS = 24;
 /** 한 프레임에 행성 텍스처를 굽는 시간 예산(ms). 시작할 때 한꺼번에 굽느라 멈추지 않게 나눈다 */
 const BAKE_BUDGET_MS = 5;
-/** 이보다 크게 확대(화면 px / 월드 단위)되면 캐시 캔버스가 너무 커지므로 직접 그린다 (그때는 보이는 행성도 몇 개뿐) */
-const MAX_CACHE_SCALE = 5;
+/**
+ * 캐시 캔버스의 최대 배율(기기 px / 월드 단위) = 최대 확대 3.2 × 렌더러의 DPR 상한 2. 이보다 크게 확대되면(세계가 작아
+ * 최소 확대가 3.2 를 넘는 경우뿐) 캐시를 이 배율로 그려 늘려 찍는다. 가장 큰 행성도 캐시가 800px 남짓이다.
+ * (예전처럼 5 를 넘으면 직접 그리면 DPR 2 화면에서 2.5배 넘게 확대했을 때 보이는 행성 전부를 매 프레임 통째로 다시 칠한다.
+ * 5 에서 멈추고 늘려 찍으면 확대 3.2 에서 고리 · 테두리가 흐려지고, 2.6~2.9 에서는 보간 복사라 1:1 복사보다 오히려 비싸다)
+ */
+export const MAX_CACHE_SCALE = 6.4;
+/**
+ * 이 배율(기기 px / 월드 단위)을 넘게 확대했을 때 화면에 절반도 걸치지 않은 행성은 캐시 대신 보이는 부분만 직접 그린다.
+ * 그만큼 확대하면 캐시 한 장이 수십만 px 이라, 자전 때문에 다시 그릴 때마다 화면 밖 부분까지 칠하는 값이 보이는 부분만
+ * 매 프레임 칠하는 값보다 커진다 (화면을 채운 행성은 캐시가 2~3배 싸다)
+ */
+const DIRECT_SCALE = 5;
 /** 점령 후 새 주인의 색이 행성을 덮어 가는 시간(초) */
 const FLOOD_TIME = 0.8;
 /** 마지막 강하 피해 뒤 '포위당하는 중' 표시가 남는 시간(초) */
@@ -51,6 +63,8 @@ interface PlanetState {
   art: PlanetArt | null;
   baker: PlanetBaker | null;
   cache: PlanetCache | null;
+  /** 점령 연출 중 새 주인의 모습 (연출이 끝나면 cache 가 된다) */
+  next: PlanetCache | null;
   /** 화면에 보이는 방어도 비율 (실제 값을 부드럽게 따라간다) */
   shown: number;
   /** 최근 피해 자국: 잠시 머물렀다가 shown 으로 줄어든다 (격투 게임 체력바처럼) */
@@ -101,11 +115,35 @@ interface Patterns {
 }
 
 const spot = { x: 0, y: 0 };
+const wave = { x: 0, y: 0, r: 0 };
+
+/** 캐시 캔버스를 그릴 배율: 화면 배율 그대로, 단 MAX_CACHE_SCALE 까지 (그 위로는 캐시를 늘려 찍는다) */
+export function cacheScale(scale: number): number {
+  return Math.min(scale, MAX_CACHE_SCALE);
+}
+
+/** 행성(중심 x, y · 반지름 r 의 네모)이 보이는 영역에 걸친 비율 0~1 */
+export function onScreenShare(view: ViewRect, x: number, y: number, r: number): number {
+  const w = Math.max(0, Math.min(view.x1, x + r) - Math.max(view.x0, x - r));
+  const h = Math.max(0, Math.min(view.y1, y + r) - Math.max(view.y0, y - r));
+  return (w * h) / (4 * r * r);
+}
+
+/**
+ * 점령 물결의 원 (행성 중심 기준). 공격군이 들어온 표면 자리(entry 방향)에서 퍼져 나가,
+ * flood = 1 이면 들어온 자리에서 반대쪽 대기권 끝까지(R + A)에 여유 2 를 더해 대기권 전체를 덮는다
+ */
+export function floodCircle(R: number, A: number, entry: number, flood: number, out: { x: number; y: number; r: number }): void {
+  const e = 1 - Math.pow(1 - flood, 3);
+  out.x = Math.cos(entry) * R;
+  out.y = Math.sin(entry) * R;
+  out.r = Math.max(0.1, e * (R + A + 2));
+}
 
 export class PlanetLayer {
   private states: PlanetState[] = [];
   private matrix = new DOMMatrix();
-  /** 직접 그리기(크게 확대했을 때 · 점령 연출)용 패턴. 패턴은 만든 컨텍스트에서 쓴다 */
+  /** 직접 그리기(크게 확대해 화면 가장자리에 걸친 행성)용 패턴. 패턴은 만든 컨텍스트에서 쓴다 */
   private patterns = new Map<number, Patterns>();
   private frames = 0;
   /** 직전 프레임의 배율. 확대/축소 중에는 캐시를 늘려서 쓰고, 멈추면 그 배율로 다시 그린다 */
@@ -116,7 +154,7 @@ export class PlanetLayer {
     if (!s) {
       const f = Math.max(0, p.defense / p.maxDefense);
       s = this.states[p.id] = {
-        art: null, baker: null, cache: null, shown: f, trail: f, trailHold: 0, ringLive: false, hit: 0, hitColor: '#ffffff', flood: 1, prevColor: NEUTRAL_RING, entry: 0, birth: 0,
+        art: null, baker: null, cache: null, next: null, shown: f, trail: f, trailHold: 0, ringLive: false, hit: 0, hitColor: '#ffffff', flood: 1, prevColor: NEUTRAL_RING, entry: 0, birth: 0,
       };
     }
     return s;
@@ -179,7 +217,7 @@ export class PlanetLayer {
       if (!inView(view, p.x, p.y, p.atmosphereRadius + 40)) continue;
       const s = this.state(p);
       const color = this.ownerColor(world, p);
-      // 점령 연출 중에는 이전 주인의 모습을 깔고 그 위로 새 색이 번진다 (drawFlood)
+      // 점령 연출 중에는 물결 바깥이 이전 주인의 모습이다 (아래 flooding)
       const shownColor = s.flood < 1 ? s.prevColor : color;
       if (!s.art) this.bake(p, s, bakeDeadline);
       const art = s.art;
@@ -195,49 +233,37 @@ export class PlanetLayer {
       const liveRing = low || s.ringLive;
       const params: PaintParams = { color: shownColor, scroll, cloudScroll, lit: lit(shownColor), extras, px, ring: !liveRing };
 
-      if (art && scale <= MAX_CACHE_SCALE) {
-        const c = this.cache(p, s, scale);
-        const ringKey = liveRing ? -1 : Math.round(s.shown * 480) * 1000 + Math.round(s.trail * 480);
-        const detail = params.lit * 4 + (extras ? 2 : 0) + (low ? 1 : 0);
-        const spun = wrapDist(scroll, c.scroll, period);
-        const ratio = scale / c.scale;
-        // 확대/축소가 진행 중이면 (배율 차이가 크지 않은 한) 기존 캐시를 늘려 쓰고, 멈춘 뒤에 다시 그린다
-        const rescale = c.scale !== scale && (!zooming || ratio < 0.8 || ratio > 1.25);
-        if (rescale || c.color !== shownColor || c.ring !== ringKey || c.detail !== detail || spun * c.scale >= opts.spinStep) {
-          if (c.scale !== scale) this.fit(c, p, scale);
-          const g = c.g;
-          g.setTransform(1, 0, 0, 1, 0, 0);
-          g.clearRect(0, 0, c.canvas.width, c.canvas.height);
-          g.setTransform(scale, 0, 0, scale, c.canvas.width / 2, c.canvas.height / 2);
-          c.pattern ??= g.createPattern(art.surface, 'repeat-x');
-          if (art.clouds) c.cloudPattern ??= g.createPattern(art.clouds, 'repeat-x');
-          this.paint(g, p, s, art, { surface: c.pattern, clouds: c.cloudPattern }, params);
-          c.scale = scale;
-          c.color = shownColor;
-          c.ring = ringKey;
-          c.detail = detail;
-          c.scroll = scroll;
-        }
-        c.used = clock;
-        const dx = m.a * p.x + m.e, dy = m.d * p.y + m.f;
-        const cw = c.canvas.width, ch = c.canvas.height;
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        if (c.scale === scale) {
-          // 정수 픽셀에 찍어야 보간 없이 그대로 복사된다
-          ctx.drawImage(c.canvas, Math.round(dx - cw / 2), Math.round(dy - ch / 2));
-        } else {
-          const k = scale / c.scale;
-          ctx.drawImage(c.canvas, dx - (cw / 2) * k, dy - (ch / 2) * k, cw * k, ch * k);
-        }
-        ctx.setTransform(m);
-      } else {
-        ctx.save();
-        ctx.translate(p.x, p.y);
-        this.paint(ctx, p, s, art, this.directPatterns(ctx, p, art), params);
-        ctx.restore();
+      // 점령 연출: 이전 주인의 모습(s.cache)은 물결 바깥에만, 새 주인의 모습(s.next)은 물결 안에만 찍는다.
+      // 새 모습을 이전 모습 위에 겹쳐 칠하면 반투명 대기 · 가산 광륜이 두 겹으로 쌓였다가 연출이 끝나는 프레임에 한 겹으로
+      // 돌아가며 확 어두워진다. 새 모습도 같은 방식(캐시)으로 그려 두었다가 끝나면 그대로 이어 쓰므로 마지막 프레임과 똑같다
+      // (화면에 바로 그리면 가산 광륜이 투명 캐시에 그린 것보다 밝아 그만큼 또 튄다)
+      const flooding = s.flood < 1;
+      if (!flooding && s.next) {
+        s.cache = s.next;
+        s.next = null;
       }
-
-      if (s.flood < 1) this.drawFlood(ctx, p, s, art, { ...params, color, lit: lit(color) });
+      if (flooding) {
+        floodCircle(p.radius, p.atmosphereRadius, s.entry, s.flood, wave);
+        const half = 2 * (p.radius + p.atmosphereRadius) + 8;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(p.x - half, p.y - half, half * 2, half * 2);
+        ctx.arc(p.x + wave.x, p.y + wave.y, wave.r, 0, Math.PI * 2);
+        ctx.clip('evenodd');
+      }
+      const direct = scale > DIRECT_SCALE && onScreenShare(view, p.x, p.y, p.atmosphereRadius + 4) < 0.5;
+      this.drawPlanet(ctx, m, p, s, art, 'cache', direct, scale, zooming, clock, opts.spinStep, params);
+      if (flooding) {
+        ctx.restore();
+        const next: PaintParams = { ...params, color, lit: lit(color) };
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(p.x + wave.x, p.y + wave.y, wave.r, 0, Math.PI * 2);
+        ctx.clip();
+        this.drawPlanet(ctx, m, p, s, art, 'next', direct, scale, zooming, clock, opts.spinStep, next);
+        ctx.restore();
+        this.drawFlood(ctx, p, s, next);
+      }
       this.drawLive(ctx, world, p, s, color, px, hover === p.id, clock, low, liveRing, art, scroll, opts);
       if (p.owner !== NEUTRAL) this.drawProduction(ctx, p, color, px, clock);
     }
@@ -251,7 +277,10 @@ export class PlanetLayer {
 
     // 한동안 화면에 안 나온 행성의 캐시는 버린다 (확대한 채 맵을 훑으면 메모리가 쌓이므로)
     if (++this.frames % 120 === 0) {
-      for (const s of this.states) if (s?.cache && clock - s.cache.used > 3) s.cache = null;
+      for (const s of this.states) {
+        if (s?.cache && clock - s.cache.used > 3) s.cache = null;
+        if (s?.next && clock - s.next.used > 3) s.next = null;
+      }
     }
   }
 
@@ -283,13 +312,75 @@ export class PlanetLayer {
     }
   }
 
-  private cache(p: Planet, s: PlanetState, scale: number): PlanetCache {
-    if (!s.cache) {
-      const canvas = makeCanvas(1, 1);
-      s.cache = { canvas, g: canvas.getContext('2d')!, pattern: null, cloudPattern: null, scale: -1, scroll: -1, color: '', ring: -2, detail: -1, used: 0 };
-      this.fit(s.cache, p, scale);
+  /**
+   * 행성 하나를 캐시 s[slot] 으로 찍는다 (slot = 'cache' 지금 보이는 모습, 'next' 점령 연출 중 새 주인의 모습).
+   * 캐시는 배율 · 색 · 고리 · 불빛이 바뀌었거나 자전으로 spinStep 이상 밀렸을 때만 다시 그린다.
+   * direct(크게 확대해 화면 가장자리에 걸친 행성)이거나 굽기 전(대체 그림)이면 화면에 직접 그린다
+   */
+  private drawPlanet(
+    ctx: CanvasRenderingContext2D,
+    m: DOMMatrix,
+    p: Planet,
+    s: PlanetState,
+    art: PlanetArt | null,
+    slot: 'cache' | 'next',
+    direct: boolean,
+    scale: number,
+    zooming: boolean,
+    clock: number,
+    spinStep: number,
+    o: PaintParams,
+  ): void {
+    if (!art || direct) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      this.paint(ctx, p, s, art, this.directPatterns(ctx, p, art), o);
+      ctx.restore();
+      return;
     }
-    return s.cache;
+    const cs = cacheScale(scale);
+    const c = (s[slot] ??= this.newCache(p, cs));
+    const period = art.surface.width / art.scale;
+    const ringKey = o.ring ? Math.round(s.shown * 480) * 1000 + Math.round(s.trail * 480) : -1;
+    const detail = o.lit * 4 + (o.extras ? 2 : 0) + (s.shown < LOW ? 1 : 0);
+    const spun = wrapDist(o.scroll, c.scroll, period);
+    const ratio = cs / c.scale;
+    // 확대/축소가 진행 중이면 (배율 차이가 크지 않은 한) 기존 캐시를 늘려 쓰고, 멈춘 뒤에 다시 그린다
+    const rescale = c.scale !== cs && (!zooming || ratio < 0.8 || ratio > 1.25);
+    if (rescale || c.color !== o.color || c.ring !== ringKey || c.detail !== detail || spun * c.scale >= spinStep) {
+      if (c.scale !== cs) this.fit(c, p, cs);
+      const g = c.g;
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.clearRect(0, 0, c.canvas.width, c.canvas.height);
+      g.setTransform(cs, 0, 0, cs, c.canvas.width / 2, c.canvas.height / 2);
+      c.pattern ??= g.createPattern(art.surface, 'repeat-x');
+      if (art.clouds) c.cloudPattern ??= g.createPattern(art.clouds, 'repeat-x');
+      this.paint(g, p, s, art, { surface: c.pattern, clouds: c.cloudPattern }, o);
+      c.scale = cs;
+      c.color = o.color;
+      c.ring = ringKey;
+      c.detail = detail;
+      c.scroll = o.scroll;
+    }
+    c.used = clock;
+    const dx = m.a * p.x + m.e, dy = m.d * p.y + m.f;
+    const cw = c.canvas.width, ch = c.canvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (c.scale === scale) {
+      // 정수 픽셀에 찍어야 보간 없이 그대로 복사된다
+      ctx.drawImage(c.canvas, Math.round(dx - cw / 2), Math.round(dy - ch / 2));
+    } else {
+      const k = scale / c.scale;
+      ctx.drawImage(c.canvas, dx - (cw / 2) * k, dy - (ch / 2) * k, cw * k, ch * k);
+    }
+    ctx.setTransform(m);
+  }
+
+  private newCache(p: Planet, scale: number): PlanetCache {
+    const canvas = makeCanvas(1, 1);
+    const c: PlanetCache = { canvas, g: canvas.getContext('2d')!, pattern: null, cloudPattern: null, scale: -1, scroll: -1, color: '', ring: -2, detail: -1, used: 0 };
+    this.fit(c, p, scale);
+    return c;
   }
 
   /** 배율에 맞게 캐시 캔버스 크기를 맞춘다 (조금 큰 것은 그대로 써서 확대/축소 중 재할당을 줄인다) */
@@ -377,24 +468,15 @@ export class PlanetLayer {
 
   /**
    * 점령 연출: 공격군이 들어온 쪽 표면에서 새 주인의 모습(대기 · 광륜 · 가장자리 · 고리 · 불빛)이 물결처럼 번져
-   * 0.8초 만에 행성 전체를 덮는다. 물결 앞머리는 밝게, 덮인 표면은 잠깐 새 주인 색으로 물든다.
+   * 0.8초 만에 행성 전체를 덮는다 (두 모습은 draw() 가 물결 원 안팎으로 나눠 찍었다).
+   * 여기서는 물결 앞머리를 밝게, 덮인 표면을 잠깐 새 주인 색으로 물들인다. 둘 다 끝날 때 0 으로 사라진다
    */
-  private drawFlood(ctx: CanvasRenderingContext2D, p: Planet, s: PlanetState, art: PlanetArt | null, o: PaintParams): void {
+  private drawFlood(ctx: CanvasRenderingContext2D, p: Planet, s: PlanetState, o: PaintParams): void {
     const R = p.radius, A = p.atmosphereRadius;
     const twoPi = Math.PI * 2;
-    const e = 1 - Math.pow(1 - s.flood, 3);
-    const ex = p.x + Math.cos(s.entry) * R, ey = p.y + Math.sin(s.entry) * R;
-    // 들어온 자리에서 반대쪽 대기권 끝까지 = R + A
-    const rad = Math.max(0.1, e * (R + A + 2));
+    const ex = p.x + wave.x, ey = p.y + wave.y;
+    const rad = wave.r;
     const fade = 1 - s.flood;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(ex, ey, rad, 0, twoPi);
-    ctx.clip();
-    ctx.translate(p.x, p.y);
-    this.paint(ctx, p, s, art, this.directPatterns(ctx, p, art), o);
-    ctx.restore();
 
     ctx.globalCompositeOperation = 'lighter';
     // 덮인 표면을 새 색으로 잠깐 물들인다
