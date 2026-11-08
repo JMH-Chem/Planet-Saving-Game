@@ -556,7 +556,9 @@ export class World {
       if (ru2 < atm * atm || rt2 < atm * atm) continue;
       // 보통은 경계에서 3px 여유를 두고 비켜 간다. 출발점이나 목적지가 이미 그 여유 띠 안이면(포위 슬롯이 경계 3px 밖)
       // 대기권 자체만 피한다: 띠 안의 짧은 길까지 돌게 하면 함선이 슬롯 앞에서 우회 지점만 쫓으며 맴돈다
-      const clear = ru2 >= ra * ra && rt2 >= ra * ra ? ra : atm + 0.5;
+      // 이때 여유는 두 끝점 반경보다 조금 안쪽으로 잡는다: 경계 0~0.5px 바깥 슬롯은 끝점 자체가 여유 안이라
+      // 매 틱 우회가 걸려 영영 도착하지 못했다. 끝점이 아닌 길 중간이 대기권 쪽으로 파고들 때만 비켜 간다
+      const clear = ru2 >= ra * ra && rt2 >= ra * ra ? ra : Math.min(atm + 0.5, Math.sqrt(Math.min(ru2, rt2)) - 1e-3);
       const sx = tx - ux, sy = ty - uy;
       const len2 = sx * sx + sy * sy || 1;
       const t = Math.max(0, Math.min(1, -(ux * sx + uy * sy) / len2));

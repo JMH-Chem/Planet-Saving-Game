@@ -383,3 +383,34 @@ describe('결정론', () => {
     expect(run()).toEqual(run());
   });
 });
+
+describe('우회: 대기권 바로 바깥 슬롯', () => {
+  it('목적지가 남의 대기권 경계 0~0.5px 바깥이어도 우회 지점만 쫓으며 맴돌지 않고 도착한다', () => {
+    const c = CONFIG.formation.clusterSpacing / Math.sqrt(Math.PI);
+    const slotOffset = c * Math.sqrt(0.5); // 한 기짜리 집중 대형의 첫 슬롯은 목표에서 +x 쪽으로 이만큼
+    const stuck: string[] = [];
+    for (const gap of [0.05, 0.2, 0.45]) {
+      for (const slotAngle of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+        for (const from of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+          const w = makeWorld([
+            { x: 60, y: 60, size: 'small', owner: 1, garrison: 0 },
+            { x: 600, y: 400, size: 'medium', owner: 0, garrison: 0 },
+          ]);
+          const p = w.planets[1];
+          const r = p.atmosphereRadius + gap;
+          const sx = p.x + Math.cos(slotAngle) * r, sy = p.y + Math.sin(slotAngle) * r;
+          const u = w.spawnAt(1, p.x + Math.cos(from) * 260, p.y + Math.sin(from) * 260, false);
+          order(w, [u], { kind: 'move', x: sx - slotOffset, y: sy, formation: 'cluster' });
+          step(w, DT);
+          // 시나리오 확인: 슬롯이 정말 문제의 띠 [대기권, 대기권 + 0.5) 안에 잡혔다
+          expect(Math.hypot(u.tx - p.x, u.ty - p.y) - p.atmosphereRadius).toBeCloseTo(gap, 1);
+          step(w, 20);
+          if (u.state !== 'hold') stuck.push(`gap ${gap} slot ${slotAngle.toFixed(2)} from ${from.toFixed(2)}`);
+          // 우회하느라 대기권에 들어가 행성을 치지도 않는다
+          expect(p.defense).toBe(p.maxDefense);
+        }
+      }
+    }
+    expect(stuck).toEqual([]);
+  });
+});

@@ -41,6 +41,8 @@ let alerts: Alerts | null = null;
 let hudTimer = 0;
 /** 결과 화면을 띄울 타이머. 그 전에 판을 떠나면(메뉴 · 다시 하기) 취소해야 옛 결과가 새 화면 위에 뜨지 않는다 */
 let resultTimer = 0;
+/** 메뉴 배경 관전 판이 끝난 뒤 새 판을 띄울 타이머 */
+let spectatorTimer = 0;
 let settings: MatchSettings = readLaunchSettings(params, randomSeed);
 
 function randomSeed(): number {
@@ -62,6 +64,8 @@ function teardown(): void {
   alerts?.dispose();
   window.clearInterval(hudTimer);
   window.clearTimeout(resultTimer);
+  window.clearTimeout(spectatorTimer);
+  spectatorTimer = 0;
   hud.reset();
   game = null;
   input = null;
@@ -83,11 +87,31 @@ function showMenu(): void {
   setSeg('aiCount', String(settings.aiCount));
   setSeg('difficulty', settings.difficulty);
   syncModeField();
-  game = new Game(canvas, { aiCount: 3, difficulty: 'normal', seed: randomSeed(), autoplay: true, portrait: isPortrait() });
-  game.speed = 1.5;
-  layout(true);
-  game.start();
+  startSpectator();
   if (returningFromDialog) $('btn-start').focus({ preventScroll: true });
+}
+
+/**
+ * 메뉴 뒤 관전 판. 승부가 나면 시뮬레이션이 멈춰 함선이 그대로 굳으므로, 잠시 뒤 새 시드로 다시 띄운다
+ * (메뉴를 3~4분 넘게 열어 두면 배경이 멈춘 채 남던 문제)
+ */
+function startSpectator(): void {
+  const g = new Game(canvas, { aiCount: 3, difficulty: 'normal', seed: randomSeed(), autoplay: true, portrait: isPortrait() }, {
+    onFrame: () => {
+      if (!g.match.finished || spectatorTimer) return;
+      spectatorTimer = window.setTimeout(() => {
+        spectatorTimer = 0;
+        if (game !== g || menu.hidden) return;
+        g.stop();
+        startSpectator();
+      }, 4000);
+    },
+  });
+  game = g;
+  if (params.has('debug')) Object.assign(window, { __game: g });
+  g.speed = 1.5;
+  layout(true);
+  g.start();
 }
 
 function startMatch(s: MatchSettings): void {
