@@ -186,7 +186,10 @@ export class Game {
       this.camera.update(realDt);
     }
 
-    this.renderer.render(this.world, this.camera, this.selection, this.paused ? 1 : this.acc / DT, this.overlay, realDt);
+    // 그래픽 품질은 실제로 진행 중인 판의 프레임으로만 고른다: 일시정지(도움말 · 나가기 확인도 멈춘다) 중이나
+    // 승부가 난 뒤(결과 화면)의 프레임에는 대화창 합성 비용이 섞인다
+    const live = !this.paused && !this.match.finished;
+    this.renderer.render(this.world, this.camera, this.selection, this.paused ? 1 : this.acc / DT, this.overlay, realDt, live);
     this.hooks.onFrame?.(realDt);
 
     if (!this.spectator && !this.ended && this.match.finished) {
