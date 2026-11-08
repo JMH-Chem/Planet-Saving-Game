@@ -256,13 +256,15 @@ export class World {
 
     this.moveUnits(dt);
     this.refreshCounts();
+    // 여기부터 틱 끝까지 병력은 움직이지 않는다: 이미 있던 병력의 대기권 판정은 다시 하지 않고 위 결과를 쓴다
+    const placed = this.nextUnitId;
     this.grid.rebuild(this.units);
     this.combat(dt);
     // 점령과 생산 정원은 이번 전투에서 살아남은 병력으로 판단한다.
-    if (this.removeDead()) this.refreshCounts();
+    if (this.removeDead()) this.refreshCounts(placed);
     this.resolveCaptures();
     this.updatePlanets(dt);
-    this.refreshCounts();
+    this.refreshCounts(placed);
     this.updateFactions();
 
     this.time += dt;
@@ -735,7 +737,11 @@ export class World {
 
   // ───────────────────────────── 집계 ─────────────────────────────
 
-  private refreshCounts(): void {
+  /**
+   * 진영별 행성 · 병력 수, 행성별 궤도 · 대기권 병력 수, 병력의 inPlanet · 고립을 다시 센다.
+   * placed: 이 번호보다 작은 병력은 그 뒤로 움직이지 않았으므로 u.inPlanet 을 그대로 쓴다 (같은 틱 안의 재집계).
+   */
+  private refreshCounts(placed = 0): void {
     const planets = this.planets;
     for (const p of planets) {
       p.orbitCount.fill(0);
@@ -750,6 +756,17 @@ export class World {
     const { start, list } = look;
     for (const u of this.units) {
       this.unitCount[u.faction]++;
+      if (u.id < placed) {
+        // 위치도 행성 배치도 그대로라 판정 결과가 같다 (소유자는 바뀌었을 수 있어 고립 해제는 다시 본다)
+        if (u.inPlanet >= 0) {
+          const p = planets[u.inPlanet];
+          p.presence[u.faction]++;
+          if (u.isolated && p.owner === u.faction) u.isolated = false;
+        }
+        if (u.state === 'orbit') planets[u.planet].orbitCount[u.faction]++;
+        if (this.planetCount[u.faction] === 0 && !this.factions[u.faction].invader) u.isolated = true;
+        continue;
+      }
       u.inPlanet = -1;
       const ux = u.x, uy = u.y;
       const c = look.cell(ux, uy);
