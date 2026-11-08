@@ -4,7 +4,8 @@
 **병력의 위치로** 결정하는 실시간 행성 점령 디펜스 게임. PC(마우스·키보드)와 모바일(터치)을 한 코드베이스로 지원한다.
 
 - 기획 문서: [docs/GAME_DESIGN.md](docs/GAME_DESIGN.md) — 규칙, 전술과 밸런스 검증, 방어전, 조작, 연출, AI, 기술 구조, 로드맵
-- 현재 단계: 프로토타입 v0.2 — 정복전 + 방어전(웨이브), 확대 카메라 + 미니맵, 네온 연출, 합성 효과음
+- 현재 단계: 프로토타입 v0.3 — 정복전 + 방어전(웨이브), 조향 이동, 전투 추정 AI, 영토 · 발광 그래픽, 합성 효과음, 선택형 Codex 디자인
+- **협업 현황 · 작업 보드: [docs/COLLAB.md](docs/COLLAB.md)** — Claude 와 Codex(GPT)가 무엇을 맡고 있는지, 브랜치를 어떻게 합치는지
 
 ## 실행
 
@@ -16,7 +17,7 @@ npm run build        # dist/ 에 정적 빌드
 npm run build:single # dist/index.html 한 파일짜리 빌드 (파일 하나로 공유할 때)
 ```
 
-개발용 URL 파라미터: `?play&ai=2&difficulty=hard&seed=42` 로 메뉴 없이 바로 시작, 방어전은 `&mode=defense`, `&debug` 를 붙이면 콘솔에서 `__game` 을 쓸 수 있다.
+개발용 URL 파라미터: `?play&ai=2&difficulty=hard&seed=42` 로 메뉴 없이 바로 시작, 방어전은 `&mode=defense`, `&debug` 를 붙이면 콘솔에서 `__game` 을 쓸 수 있다. `&quality=low|medium|high` 로 그래픽 품질 고정, `&design=codex` 로 Codex 디자인.
 
 ## 30초 규칙 요약
 
