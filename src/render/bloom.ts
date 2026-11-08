@@ -59,6 +59,12 @@ export function bloomBands(rowMin: ArrayLike<number>, rowMax: ArrayLike<number>,
   return bands;
 }
 
+/**
+ * 화면에 합성하는 단계 (흐림 단계 수 levels 일 때): 흐림이 두 단계 이상이면 1 단계(0 단계의 2×2 평균)에, 한 단계뿐이면
+ * 0 단계에 모은다. 캔버스 사이 복사마다 그 캔버스의 쌓인 그리기를 내보내야 하므로(가장 비싼 부분) 단계는 적게 둔다
+ */
+export const bloomTarget = (levels: number) => (levels >= 2 ? 1 : 0);
+
 interface Level {
   g: CanvasRenderingContext2D;
   canvas: HTMLCanvasElement;
@@ -140,6 +146,15 @@ export class Bloom {
     return 1 / (this.zoom * this.scale);
   }
 
+  private get target(): number {
+    return bloomTarget(this.levels.length - 1);
+  }
+
+  /** 화면에 합성하는 단계 버퍼 1px 의 월드 길이. 흐림이 덮는 폭이 이 정도라, 이보다 몇 배 큰 모양은 흐려도 윤곽이 남는다 */
+  get blurUnit(): number {
+    return 2 ** this.target * this.unit;
+  }
+
   /**
    * 한 프레임의 빛 그리기를 시작한다. 반환하는 컨텍스트는 월드 좌표계(흔들림 포함)로 맞춰져 있다.
    * 꺼져 있으면 null
@@ -197,10 +212,8 @@ export class Bloom {
       g.clearRect(0, d.y, d.w, d.h);
       g.drawImage(s.canvas, 0, s.y, s.w, s.h, 0, d.y, s.w / 2, s.h / 2);
     }
-    // 확대하며 더하기: 가장 흐린 단계부터 한 단계씩 위로 올려 합성할 단계(target)에 모은다.
-    // 흐림이 두 단계 이상이면 1 단계(0 단계의 2×2 평균)에, 한 단계뿐이면 0 단계에 모은다.
-    // 캔버스 사이 복사마다 그 캔버스의 쌓인 그리기를 내보내야 하므로(가장 비싼 부분) 단계는 적게 둔다
-    const target = L.length > 2 ? 1 : 0;
+    // 확대하며 더하기: 가장 흐린 단계부터 한 단계씩 위로 올려 합성할 단계(target)에 모은다
+    const target = this.target;
     for (let k = L.length - 1; k > target; k--) {
       const s = L[k], d = L[k - 1];
       const g = d.g;
